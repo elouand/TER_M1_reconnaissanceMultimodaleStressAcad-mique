@@ -8,3 +8,6 @@
 
 
 *Changer état:* ```qicli call ALAutonomousLife.setState "interactive"```
+
+
+*Lancer le serveur pour les photos:* ```cd /home/nao/recordings/cameras && nohup python -m SimpleHTTPServer 8000 > /dev/null 2>&1 &```

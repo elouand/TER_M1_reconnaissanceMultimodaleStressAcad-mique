@@ -59,8 +59,8 @@ try:
             four_channels = np.repeat(audio_np, 4)
             
             # Ajout du sifflement des ventilateurs (Bruit Gaussien)
-            fan_noise = np.random.normal(0, 300, len(four_channels)).astype(np.int16)
-            combined = four_channels + fan_noise
+            #fan_noise = np.random.normal(0, 300, len(four_channels)).astype(np.int16)
+            combined = four_channels #+ fan_noise
             
             sock.sendto(combined.tobytes(), (TARGET_IP, PORT_AUDIO))
         except Exception as e:

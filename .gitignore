@@ -1,0 +1,5 @@
+modele_ton/
+venv/
+__pycache__/
+*.pyc
+.DS_Store

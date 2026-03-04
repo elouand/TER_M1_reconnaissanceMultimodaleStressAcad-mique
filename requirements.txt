@@ -1,2 +1,9 @@
 numpy
 opencv-python
+torch
+librosa
+transformers
+pyaudio
+torchvision
+timm
+protobuf

@@ -31,32 +31,42 @@ def audio_thread():
     
     while True:
         try:
-            data, addr = sock_audio.recvfrom(4096) # Taille max paquet UDP
+            # 1. On augmente le buffer à 8192 octets (la taille exacte envoyée par l'émulateur)
+            # On peut même mettre 65535 (le max UDP) pour être totalement serein
+            data, addr = sock_audio.recvfrom(8192) 
             audio_data = np.frombuffer(data, dtype=np.int16)
             
-            # 1. Lecture directe pour le monitoring (ton code actuel)
-            stream.write(audio_data.tobytes())
+            # 2. Séparation des canaux : on ne garde que le 1er micro sur les 4
+            # C'est vital pour que l'IA entende une voix humaine normale
+            audio_mono = audio_data[0::4]
+            
+            # 3. Lecture directe pour le monitoring sur les enceintes du PC
+            stream.write(audio_mono.tobytes())
 
-            # 2. Accumulation pour analyse VAD
-            audio_buffer.append(audio_data)
+            # 4. Accumulation pour l'analyse VAD
+            audio_buffer.append(audio_mono)
             
             if len(audio_buffer) >= CHUNKS_AUDIO:
-                # On fusionne les chunks pour créer un segment
+                # On fusionne les chunks (environ 1 seconde d'audio)
                 segment = np.concatenate(audio_buffer).astype(np.float32) / 32768.0
                 
-                # On lance l'analyse dans un thread séparé pour ne pas bloquer l'audio
+                # Inférence dans un thread séparé
                 threading.Thread(target=audio_analysis, args=(segment,)).start()
                 
-                # On vide le buffer
                 audio_buffer = [] 
 
         except Exception as e:
-            print(f"Erreur : {e}")
+            print(f"Erreur thread audio : {e}")
             
 def audio_analysis(segment):
+    # Appel à audToVAD qui renvoie désormais le dictionnaire complet {arousal, dominance, valence}
     scores = get_acoustic_vad(segment, sampling_rate=48000)
+    
     if scores:
-        print(f"Résultats VAD : Valence={scores['valence']:.2f}, Arousal={scores['arousal']:.2f}")
+        # On ajoute dominance ici pour l'affichage
+        print(f"TON : Valence={scores['valence']:.2f}, "
+              f"Arousal={scores['arousal']:.2f}, "
+              f"Dominance={scores['dominance']:.2f}")
 
 # Lancement du thread Audio
 t_audio = threading.Thread(target=audio_thread)

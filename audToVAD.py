@@ -1,58 +1,97 @@
 # -*- coding: utf-8 -*-
-import torch
 import numpy as np
+import torch
+import torch.nn as nn
 import librosa
-from huggingface_hub import login
-from transformers import pipeline
+from transformers import Wav2Vec2Processor
+from transformers.models.wav2vec2.modeling_wav2vec2 import (
+    Wav2Vec2Model,
+    Wav2Vec2PreTrainedModel,
+)
 
-# 1. Authentification
-MON_TOKEN = "token dans le .env"
-login(token=MON_TOKEN)
+# --- ARCHITECTURE OFFICIELLE AUDEERING ---
+class RegressionHead(nn.Module):
+    r"""Classification head."""
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.final_dropout)
+        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
 
-# 2. Chargement du modèle
-# Note : Le premier lancement téléchargera environ 1.2 Go de données
-print("Initialisation du modèle VAD (Audeering Wav2Vec2)...")
+    def forward(self, features, **kwargs):
+        x = features
+        x = self.dropout(x)
+        x = self.dense(x)
+        x = torch.tanh(x)
+        x = self.dropout(x)
+        x = self.out_proj(x)
+        return x
 
-try:
-    classifier = pipeline(
-        "audio-classification", 
-        model="audeering/wav2vec2-large-robust-12-ft-emotion-msp-podcast",
-        token=MON_TOKEN
-    )
-    print("Modèle prêt et mis en cache !")
-except Exception as e:
-    print("Erreur lors du chargement du modèle : {0}".format(e))
+class EmotionModel(Wav2Vec2PreTrainedModel):
+    r"""Speech emotion classifier."""
+    def __init__(self, config):
+        super().__init__(config)
+        self.config = config
+        self.wav2vec2 = Wav2Vec2Model(config)
+        self.classifier = RegressionHead(config)
+        
+        # FIX COMPATIBILITÉ : On initialise comme un dictionnaire vide 
+        # pour éviter l'erreur AttributeError sur .keys()
+        self.all_tied_weights_keys = {} 
+        
+        self.init_weights()
+
+    def forward(self, input_values):
+        outputs = self.wav2vec2(input_values)
+        hidden_states = outputs[0]
+        hidden_states = torch.mean(hidden_states, dim=1)
+        logits = self.classifier(hidden_states)
+        return hidden_states, logits
+
+# --- CHARGEMENT ---
+PATH_LOCAL = "./modele_ton"
+device = 'cpu'
+
+print("Chargement du modèle local audEERING (Wav2Vec2-Large-Robust)...")
+processor = Wav2Vec2Processor.from_pretrained(PATH_LOCAL)
+model = EmotionModel.from_pretrained(PATH_LOCAL).to(device)
+model.eval()
 
 def get_acoustic_vad(audio_numpy, sampling_rate=48000):
     """
-    Prend un tableau numpy d'audio (int16) et renvoie les scores VAD.
-    Conversion et rééchantillonnage inclus pour la compatibilité Pepper -> IA.
+    Predict emotions: arousal, dominance, valence (0...1).
     """
     try:
-        # A. Conversion int16 (Pepper) -> float32 normalisé [-1, 1]
+        # 1. Conversion float32 normalisé
         if audio_numpy.dtype == np.int16:
             audio_float = audio_numpy.astype(np.float32) / 32768.0
         else:
             audio_float = audio_numpy
 
-        # B. Rééchantillonnage de 48kHz (Pepper) vers 16kHz (IA)
-        # Indispensable pour ne pas fausser l'analyse du ton
+        # 2. Resampling PHYSIQUE 48k -> 16k
         audio_16k = librosa.resample(audio_float, orig_sr=sampling_rate, target_sr=16000)
 
-        # C. Inférence
-        results = classifier(audio_16k)
-        
-        # Le modèle renvoie 'arousal', 'dominance', 'valence'
-        vad_dict = {res['label']: res['score'] for res in results}
-        return vad_dict
+        # 3. Passage au processor en lui disant que c'est du 16000 Hz
+        # C'est ici qu'on corrige l'erreur : on force sampling_rate=16000
+        y = processor(audio_16k, sampling_rate=16000, return_tensors="pt", padding=True)
+        y = y['input_values'].to(device)
 
+        with torch.no_grad():
+            # Le modèle attend un raw audio signal en entrée
+            _, logits = model(y)
+
+        scores = logits.detach().cpu().numpy()[0]
+        
+        return {
+            'arousal': float(scores[0]),
+            'dominance': float(scores[1]),
+            'valence': float(scores[2])
+        }
     except Exception as e:
-        print("Erreur lors de l'inférence VAD : {0}".format(e))
+        print(f"Erreur VAD acoustique : {e}")
         return None
 
 if __name__ == "__main__":
-    # Test rapide si lancé seul
-    print("Test du script audToVAD...")
-    # Simulation d'un second de silence à 48kHz
-    test_signal = np.zeros(48000, dtype=np.int16)
-    print("Résultat test (silence) :", get_acoustic_vad(test_signal))
+    # Test silence (doit donner environ 0.54, 0.60, 0.40)
+    test_signal = np.zeros(16000, dtype=np.float32)
+    print("Test silence :", get_acoustic_vad(test_signal, sampling_rate=16000))

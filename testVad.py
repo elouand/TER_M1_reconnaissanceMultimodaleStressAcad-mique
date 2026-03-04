@@ -7,7 +7,14 @@ import timm
 import time
 
 # --- CONFIGURATION DU MODÈLE ---
-MODEL_PATH = "/home/elouand/.hsemotion/enet_b0_8_va_mtl.pt" # Vérifie ce chemin
+MODEL_PATH = "./.hsemotion/enet_b0_8_va_mtl.pt"  # Vérifie ce chemin
+
+import os
+
+# Helper pour valider la présence du fichier de modèle
+if not os.path.isfile(MODEL_PATH):
+    raise FileNotFoundError(f"Le fichier de modèle n'a pas été trouvé : {MODEL_PATH}.\n" \
+                             "Vérifiez que le chemin est correct et que le modèle a été téléchargé.")
 
 class VADModel(nn.Module):
     """ On encapsule le modèle pour un accès direct aux sorties """

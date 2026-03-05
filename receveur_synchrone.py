@@ -4,49 +4,50 @@ import numpy as np
 import threading
 import pyaudio
 import time
-import os
+import signal
 from ctypes import *
 
 from vidToVAD import get_visual_vad
-from audToVAD import get_acoustic_vad
+from audToVAD import get_acoustic_vad, get_text_vad
 from MultimodalState import MultimodalState 
 
-# --- 1. SUPPRESSION DES LOGS ALSA (VERSION SÉCURISÉE) ---
+# --- VERROUS DE SÉCURITÉ (Évite les crashs CPU 0xC0000005) ---
+lock_ton = threading.Lock()
+lock_texte = threading.Lock()
+
+# --- SUPPRESSION DES LOGS ALSA ---
 def py_error_handler(filename, line, function, err, fmt):
-    pass # Ne fait rien, ignore l'erreur
+    pass
 
 def silence_alsa():
-    # On définit le type de callback
     ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
-    # On stocke le handler dans une variable globale pour éviter qu'il soit nettoyé par le Garbage Collector
     global c_error_handler
     c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
-    
     try:
         asound = cdll.LoadLibrary('libasound.so.2')
         asound.snd_lib_error_set_handler(c_error_handler)
     except Exception as e:
-        print(f"Note: Impossible de silencer ALSA ({e})")
+        pass
 
-# Appeler le silence AVANT toute initialisation audio
 silence_alsa()
 
 # --- INITIALISATION ---
 UDP_IP = "0.0.0.0"
 PORT_VIDEO, PORT_AUDIO = 5005, 5006
-audio_buffer = []
 state_manager = MultimodalState()
 
-# --- THREAD AUDIO ---
+# --- THREAD AUDIO (SYSTÈME DOUBLE BUFFER) ---
 def run_audio_listening():
-    # Initialisation locale de PyAudio
     pa = pyaudio.PyAudio()
-    audio_stream = pa.open(format=pyaudio.paInt16, channels=1, rate=48000, output=True)
+    audio_stream = pa.open(format=pyaudio.paInt16, channels=1, rate=48000, output=True, frames_per_buffer=1024)
     
     sock_audio = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock_audio.settimeout(1.0) # Permet de vérifier la variable 'running' régulièrement
     sock_audio.bind((UDP_IP, PORT_AUDIO))
     
-    global audio_buffer
+    buffer_ton = []
+    buffer_texte = []
+    
     print("Écoute audio activée...")
     while True:
         try:
@@ -54,36 +55,63 @@ def run_audio_listening():
             raw = np.frombuffer(data, dtype=np.int16)
             audio_mono = raw[0::4]
             
-            audio_stream.write(audio_mono.tobytes())
+            # DÉSACTIVÉ : Évite le larsen mortel avec le Mixage Stéréo
+            # audio_stream.write(audio_mono.tobytes()) 
             
-            audio_buffer.append(audio_mono)
-            if len(audio_buffer) >= 45: # ~1s
-                segment = np.concatenate(audio_buffer).astype(np.float32) / 32768.0
-                # On lance l'analyse dans un thread séparé
-                threading.Thread(target=audio_analysis_task, args=(segment,), daemon=True).start()
-                audio_buffer = []
-        except:
+            buffer_ton.append(audio_mono)
+            buffer_texte.append(audio_mono)
+            
+            # 1. ANALYSE DU TON (~ 1 seconde)
+            if len(buffer_ton) >= 45: 
+                segment_ton = np.concatenate(buffer_ton).astype(np.float32) / 32768.0
+                threading.Thread(target=audio_analysis_ton_task, args=(segment_ton,), daemon=True).start()
+                buffer_ton = []
+                
+            # 2. ANALYSE DU TEXTE (~ 4.2 secondes)
+            if len(buffer_texte) >= 150: 
+                segment_texte = np.concatenate(buffer_texte).astype(np.float32) / 32768.0
+                threading.Thread(target=audio_analysis_texte_task, args=(segment_texte,), daemon=True).start()
+                buffer_texte = []
+                
+        except socket.timeout:
+            continue
+        except Exception as e:
             pass
-
-def audio_analysis_task(segment):
-    # Calcul rapide du volume (RMS) pour savoir si c'est du silence
-    rms = np.sqrt(np.mean(segment**2))
-    
-    # Seuil empirique : n'envoie à la matrice que si on parle vraiment
-    if rms > 0.02: 
-        res = get_acoustic_vad(segment, sampling_rate=48000)
-        if res:
-            v = (res['valence'] * 2) - 1
-            a = (res['arousal'] * 2) - 1
-            d = (res['dominance'] * 2) - 1
             
-            # On ne met à jour la matrice QUE s'il y a du son
-            state_manager.update("audio", [v, a, d])
-    else:
-        # Optionnel : on ne fait rien. 
-        # La valeur audio dans la matrice va s'amortir toute seule 
-        # car son timestamp ne sera pas mis à jour.
-        pass
+    # Nettoyage à la fermeture
+    audio_stream.stop_stream()
+    audio_stream.close()
+    pa.terminate()
+    print("Thread audio fermé proprement.")
+
+# --- TÂCHES ASYNCHRONES ---
+def audio_analysis_ton_task(segment):
+    if not lock_ton.acquire(blocking=False):
+        return
+    try:
+        rms = np.sqrt(np.mean(segment**2))
+        if rms > 0.01:
+            res_aud = get_acoustic_vad(segment, sampling_rate=48000)
+            if res_aud:
+                v = (res_aud['valence'] * 2) - 1
+                a = (res_aud['arousal'] * 2) - 1
+                d = (res_aud['dominance'] * 2) - 1
+                state_manager.update("audio", [v, a, d])
+                print(f"[TON] Valence: {res_aud['valence']:.2f} Arousal: {res_aud['arousal']:.2f} Dominance: {res_aud['dominance']:.2f}")
+    finally:
+        lock_ton.release()
+
+def audio_analysis_texte_task(segment):
+    if not lock_texte.acquire(blocking=False):
+        return
+    try:
+        rms = np.sqrt(np.mean(segment**2))
+        if rms > 0.01:
+            texte, _ = get_text_vad(segment)
+            if texte:
+                print(f"[STT] {texte}")
+    finally:
+        lock_texte.release()
 
 # --- BOUCLE PRINCIPALE ---
 def main():

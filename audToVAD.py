@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import librosa
+import whisper
 from transformers import Wav2Vec2Processor
 from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2Model,
@@ -90,6 +91,31 @@ def get_acoustic_vad(audio_numpy, sampling_rate=48000):
     except Exception as e:
         print(f"Erreur VAD acoustique : {e}")
         return None
+    
+stt_model = whisper.load_model("base")
+
+def get_text_vad(audio_segment, orig_sr=48000):
+    try:
+        # 1. Resampling OBLIGATOIRE (48k -> 16k)
+        audio_16k = librosa.resample(audio_segment, orig_sr=orig_sr, target_sr=16000)
+
+        # 2. Sécurité : Whisper a besoin d'un peu de longueur
+        if len(audio_16k) < 16000: # Minimum 1 seconde (16000 frames)
+            return None, None
+
+        # 3. Inférence
+        result = stt_model.transcribe(
+            audio_16k, 
+            language="French", 
+            fp16=False
+        )
+        
+        texte = result["text"].strip()
+        return texte, {"valence": 0.5, "arousal": 0.5}
+        
+    except Exception as e:
+        print(f"Erreur STT détaillée : {e}")
+        return None, None
 
 if __name__ == "__main__":
     # Test silence (doit donner environ 0.54, 0.60, 0.40)

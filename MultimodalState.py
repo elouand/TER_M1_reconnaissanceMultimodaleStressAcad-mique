@@ -7,7 +7,7 @@ class MultimodalState:
         self.data = {
             "vision": np.array([0.5, 0.5, 0.5, time.time()]),
             "audio":  np.array([0.5, 0.5, 0.5, time.time()]),
-            "texte":  np.array([0.5, 0.5, 0.5, time.time()])
+            "texte":  np.array([0.5, 0.5, 0.5, 0.0])
         }
 
         # MATRICE DE POIDS (Vecteur [W_v, W_a, W_d] par modalité)
@@ -18,7 +18,7 @@ class MultimodalState:
         }
 
         # Constantes d'amortissement (lambda)
-        self.decay = {"vision": 0.01, "audio": 0.4, "texte": 0.15}
+        self.decay = {"vision": 0.01, "audio": 0.15, "texte": 0.1}
 
     def update(self, modality, vad_values):
         # vad_values doit être un array/liste de 3 éléments

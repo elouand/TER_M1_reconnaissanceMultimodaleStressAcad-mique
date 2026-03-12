@@ -53,7 +53,8 @@ def run_audio_listening():
         try:
             data, _ = sock_audio.recvfrom(8192)
             raw = np.frombuffer(data, dtype=np.int16)
-            audio_mono = raw[0::4]
+            raw_reshaped = raw.reshape(-1, 4)
+            audio_mono = raw_reshaped.mean(axis=1).astype(np.int16)
             
             # DÉSACTIVÉ : Évite le larsen mortel avec le Mixage Stéréo
             # audio_stream.write(audio_mono.tobytes()) 
@@ -145,7 +146,7 @@ def main():
 
                 # Dessin
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(100, 100))
+                faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
                 
                 for (x, y, w, h) in faces:
                     color = (0, 255, 0) if v_f >= 0 else (0, 0, 255)

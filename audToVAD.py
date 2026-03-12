@@ -92,7 +92,7 @@ def get_acoustic_vad(audio_numpy, sampling_rate=48000):
         print(f"Erreur VAD acoustique : {e}")
         return None
     
-stt_model = whisper.load_model("base")
+stt_model = whisper.load_model("tiny")
 
 def get_text_vad(audio_segment, orig_sr=48000):
     try:
@@ -106,8 +106,9 @@ def get_text_vad(audio_segment, orig_sr=48000):
         # 3. Inférence
         result = stt_model.transcribe(
             audio_16k, 
-            language="French", 
-            fp16=False
+            language="fr", # On force le français
+            fp16=False,
+            initial_prompt="Ceci est une conversation en français sur le stress lors d'un examen."
         )
         
         texte = result["text"].strip()

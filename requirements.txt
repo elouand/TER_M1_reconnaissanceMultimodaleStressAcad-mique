@@ -7,3 +7,4 @@ pyaudio
 torchvision
 timm
 protobuf
+openai-whisper

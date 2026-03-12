@@ -96,23 +96,25 @@ stt_model = whisper.load_model("tiny")
 
 def get_text_vad(audio_segment, orig_sr=48000):
     try:
-        # 1. Resampling OBLIGATOIRE (48k -> 16k)
+        # 1. Resampling
         audio_16k = librosa.resample(audio_segment, orig_sr=orig_sr, target_sr=16000)
 
-        # 2. Sécurité : Whisper a besoin d'un peu de longueur
-        if len(audio_16k) < 16000: # Minimum 1 seconde (16000 frames)
-            return None, None
+        # 2. Normalisation stricte pour Whisper (Max absolu à 1.0)
+        # Cela "augmente le volume" mathématiquement sans saturer le signal
+        max_val = np.max(np.abs(audio_16k))
+        if max_val > 0:
+            audio_16k = audio_16k / max_val
 
         # 3. Inférence
         result = stt_model.transcribe(
             audio_16k, 
-            language="fr", # On force le français
+            language="fr", 
             fp16=False,
-            initial_prompt="Ceci est une conversation en français sur le stress lors d'un examen."
+            initial_prompt="Ceci est une conversation en français."
         )
         
         texte = result["text"].strip()
-        return texte, {"valence": 0.5, "arousal": 0.5}
+        return texte, {"valence (factice)": 0.5, "arousal (factice)": 0.5}
         
     except Exception as e:
         print(f"Erreur STT détaillée : {e}")

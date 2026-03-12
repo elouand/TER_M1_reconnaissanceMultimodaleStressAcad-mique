@@ -36,6 +36,13 @@ UDP_IP = "0.0.0.0"
 PORT_VIDEO, PORT_AUDIO = 5005, 5006
 state_manager = MultimodalState()
 
+# --- CONFIGURATION RETOUR ROBOT ---
+PEPPER_IP = "192.168.1.101" # À adapter avec l'IP réelle du robot
+PORT_RETOUR = 5007
+sock_retour = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+
 # --- THREAD AUDIO (SYSTÈME DOUBLE BUFFER) ---
 def run_audio_listening():
     pa = pyaudio.PyAudio()
@@ -57,7 +64,7 @@ def run_audio_listening():
             audio_mono = raw_reshaped.mean(axis=1).astype(np.int16)
             
             # DÉSACTIVÉ : Évite le larsen mortel avec le Mixage Stéréo
-            # audio_stream.write(audio_mono.tobytes()) 
+            audio_stream.write(audio_mono.tobytes()) 
             
             buffer_ton.append(audio_mono)
             buffer_texte.append(audio_mono)
@@ -143,7 +150,7 @@ def main():
 
                 # Fusion
                 v_f, a_f, d_f = state_manager.get_fusion()
-
+    
                 # Dessin
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))

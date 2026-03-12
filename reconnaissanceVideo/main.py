@@ -1,69 +1,51 @@
 import cv2
-import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
+import numpy as np
 from collections import deque
-from traitementVideo import EmotionRegressor
+from traitementVideo import get_visual_vad
 
 # --- CONFIGURATION ---
-MODEL_PATH = 'detector.tflite'
-SEQ_LEN = 5 # On garde le buffer pour lisser les résultats (optionnel mais recommandé)
-
-# 1. Initialisation de MediaPipe Tasks
-base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
-options = vision.FaceDetectorOptions(base_options=base_options)
-detector = vision.FaceDetector.create_from_options(options)
-
-# 2. Initialisation de notre nouveau Regresseur
-regressor = EmotionRegressor()
-
-# Buffer pour lisser les scores (évite que les chiffres sautent trop)
+SEQ_LEN = 5
 v_buffer = deque(maxlen=SEQ_LEN)
 a_buffer = deque(maxlen=SEQ_LEN)
+d_buffer = deque(maxlen=SEQ_LEN)
 
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 cap = cv2.VideoCapture(0)
 
 while cap.isOpened():
     success, frame = cap.read()
     if not success: break
+    
+    # Effet miroir et détection
+    frame = cv2.flip(frame, 1)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(100, 100))
 
-    # MediaPipe a besoin de RGB
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-
-    # Détection
-    detection_result = detector.detect(mp_image)
-
-    if detection_result.detections:
-        detection = detection_result.detections[0]
-        bbox = detection.bounding_box
-        x, y, w, h = bbox.origin_x, bbox.origin_y, bbox.width, bbox.height
-
-        # Extraction du visage (avec protection des bords)
-        face_img = rgb_frame[max(0,y):y+h, max(0,x):x+w]
+    for (x, y, w, h) in faces:
+        # Extraction du visage pour l'IA
+        face_img = frame[y:y+h, x:x+w]
+        face_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
         
-        if face_img.size > 0:
-            # Récupération des scores VA directs
-            v, a = regressor.get_va(face_img)
-            
-            v_buffer.append(v)
-            a_buffer.append(a)
-            
-            # Moyenne glissante pour la stabilité
-            v_smooth = sum(v_buffer) / len(v_buffer)
-            a_smooth = sum(a_buffer) / len(a_buffer)
+        # Récupération VAD avec TA logique (Inversion + Tanh)
+        v, a, d = get_visual_vad(face_rgb)
+        
+        # Lissage temporel
+        v_buffer.append(v); a_buffer.append(a); d_buffer.append(d)
+        v_smooth = sum(v_buffer) / len(v_buffer)
+        a_smooth = sum(a_buffer) / len(a_buffer)
+        d_smooth = sum(d_buffer) / len(d_buffer)
 
-            # Affichage dynamique
-            # Vert si positif, Rouge si négatif
-            color = (0, 255, 0) if v_smooth > 0 else (0, 0, 255)
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            
-            text = f"Valence: {v_smooth:.2f} | Arousal: {a_smooth:.2f}"
-            cv2.putText(frame, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # Affichage (Dashboard Pepper)
+        color = (0, 255, 0) if v_smooth > 0 else (0, 0, 255)
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+        
+        cv2.putText(frame, f"V: {v_smooth:+.2f}", (x, y-55), 1, 1.2, (255,255,255), 2)
+        cv2.putText(frame, f"A: {a_smooth:+.2f}", (x, y-30), 1, 1.2, (255,255,255), 2)
+        cv2.putText(frame, f"D: {d_smooth:+.2f}", (x, y-5), 1, 1.2, (255,255,255), 2)
+        break 
 
-    cv2.imshow('Pepper - Emotion VAD Unimodal', frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    cv2.imshow('Pepper - VAD Logic Protected', frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 cap.release()
-cv2.destroyAllWindows()
+cv2.destroyAllWindows() 

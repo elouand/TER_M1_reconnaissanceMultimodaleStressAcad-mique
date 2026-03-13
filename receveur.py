@@ -1,7 +1,7 @@
 import socket
 import cv2
 import numpy as np
-
+ 
 # Configuration
 UDP_IP = "0.0.0.0" # Écoute sur toutes les interfaces
 UDP_PORT = 5005

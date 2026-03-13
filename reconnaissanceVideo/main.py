@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from collections import deque
 from traitementVideo import get_visual_vad
-
+ 
 # --- CONFIGURATION ---
 SEQ_LEN = 5
 v_buffer = deque(maxlen=SEQ_LEN)

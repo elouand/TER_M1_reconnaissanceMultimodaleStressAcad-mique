@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import os
 import sys
-
+ 
 # On s'assure que le dossier est dans le chemin Python pour l'import
 sys.path.append(os.path.join(os.path.dirname(__file__), 'reconnaissanceVideo'))
 

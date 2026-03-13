@@ -6,7 +6,7 @@ import pyaudio
 import time
 import signal
 from ctypes import *
-
+ 
 from vidToVAD import get_visual_vad
 from audToVAD import get_acoustic_vad, get_text_vad
 from MultimodalState import MultimodalState 

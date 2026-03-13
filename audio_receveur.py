@@ -1,7 +1,7 @@
 import socket
 import wave
 import numpy as np
-import noisereduce as nr
+import noisereduce as nr 
 
 UDP_IP = "0.0.0.0"
 UDP_PORT = 5006

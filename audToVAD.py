@@ -81,7 +81,7 @@ def get_acoustic_vad(audio_numpy, sampling_rate=48000):
             # Le modèle attend un raw audio signal en entrée
             _, logits = model(y)
 
-        scores = logits.detach().cpu().numpy()[0]
+        scores = logits.detach().cpu().numpy()[0] 
         
         return {
             'arousal': float(scores[0]),

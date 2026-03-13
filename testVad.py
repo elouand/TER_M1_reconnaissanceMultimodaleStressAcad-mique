@@ -5,7 +5,7 @@ from torchvision import transforms
 from PIL import Image
 import timm
 import time
-
+ 
 # --- CONFIGURATION DU MODÈLE ---
 MODEL_PATH = "./.hsemotion/enet_b0_8_va_mtl.pt"  # Vérifie ce chemin
 

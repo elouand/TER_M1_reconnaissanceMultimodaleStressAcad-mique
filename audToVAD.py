@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import numpy as np
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 import torch.nn as nn
 import librosa
@@ -92,7 +93,14 @@ def get_acoustic_vad(audio_numpy, sampling_rate=48000):
         print(f"Erreur VAD acoustique : {e}")
         return None
     
-stt_model = whisper.load_model("tiny")
+print("Chargement du modèle STT (Whisper)...")
+stt_model = whisper.load_model("turbo")
+
+print("Chargement du modèle NLP (DistilBERT)...")
+PATH_NLP = "./modele_texte"
+nlp_tokenizer = AutoTokenizer.from_pretrained(PATH_NLP)
+nlp_model = AutoModelForSequenceClassification.from_pretrained(PATH_NLP).to(device)
+nlp_model.eval()
 
 def get_text_vad(audio_segment, orig_sr=48000):
     try:
@@ -100,27 +108,45 @@ def get_text_vad(audio_segment, orig_sr=48000):
         audio_16k = librosa.resample(audio_segment, orig_sr=orig_sr, target_sr=16000)
 
         # 2. Normalisation stricte pour Whisper (Max absolu à 1.0)
-        # Cela "augmente le volume" mathématiquement sans saturer le signal
         max_val = np.max(np.abs(audio_16k))
         if max_val > 0:
             audio_16k = audio_16k / max_val
 
-        # 3. Inférence
+        # 3. Inférence STT (Whisper)
         result = stt_model.transcribe(
             audio_16k, 
             language="fr", 
             fp16=False,
-            initial_prompt="Ceci est une conversation en français."
+            initial_prompt="Ceci est une description d'image en français."
         )
         
         texte = result["text"].strip()
-        return texte, {"valence (factice)": 0.5, "arousal (factice)": 0.5}
+        
+        # Si pas de texte ou juste un bruit ignoré
+        if not texte:
+            return None, [0.0, 0.0, 0.0]
+            
+        # 4. Inférence NLP (DistilBERT)
+        inputs = nlp_tokenizer(texte, return_tensors="pt", truncation=True, padding=True).to(device)
+        with torch.no_grad():
+            outputs = nlp_model(**inputs)
+            
+        # Extraction des scores (VAD)
+        # Squeeze enlève la dimension de batch, tolist convertit le tenseur en liste Python
+        scores = outputs.logits.squeeze().cpu().tolist()
+        
+        # Sécurité si le modèle renvoie un seul score par erreur
+        if isinstance(scores, float):
+            scores = [scores, 0.0, 0.0]
+            
+        return texte, scores
         
     except Exception as e:
-        print(f"Erreur STT détaillée : {e}")
+        print(f"Erreur STT/NLP détaillée : {e}")
         return None, None
 
 if __name__ == "__main__":
-    # Test silence (doit donner environ 0.54, 0.60, 0.40)
+    # Test silence
     test_signal = np.zeros(16000, dtype=np.float32)
-    print("Test silence :", get_acoustic_vad(test_signal, sampling_rate=16000))
+    print("Test silence (Ton) :", get_acoustic_vad(test_signal, sampling_rate=16000))
+    print("Test silence (Texte) :", get_text_vad(test_signal, orig_sr=16000))

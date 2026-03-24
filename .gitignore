@@ -1,4 +1,5 @@
 modele_ton/
+modele_texte/
 venv/
 __pycache__/
 *.pyc

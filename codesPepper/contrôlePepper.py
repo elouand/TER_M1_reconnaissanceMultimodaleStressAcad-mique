@@ -6,7 +6,6 @@ import time
 from naoqi import ALProxy
 
 def get_key():
-    """ Capture une touche du clavier sans attendre Entrée """
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
@@ -17,116 +16,130 @@ def get_key():
     return ch
 
 def main(robot_ip="127.0.0.1"):
-    # Sauvegarde de la configuration du terminal pour le mode texte
     fd = sys.stdin.fileno()
     original_settings = termios.tcgetattr(fd)
 
     try:
-        # Initialisation des services
         motion = ALProxy("ALMotion", robot_ip, 9559)
         tts = ALProxy("ALTextToSpeech", robot_ip, 9559)
+        life = ALProxy("ALAutonomousLife", robot_ip, 9559)
         
-        print("Preparation du robot...")
-        tts.setLanguage("French")
+        # Désactivation des mouvements autonomes pour garder la tablette active
+        try:
+            life.setAutonomousAbilityEnabled("BasicAwareness", False)
+            life.setAutonomousAbilityEnabled("BackgroundMovement", False)
+            motion.setBreathEnabled("All", False)
+        except Exception as e:
+            print("[!] Note: Erreur init :", e)
+
         motion.wakeUp()
+        motion.setStiffnesses(["RArm", "Head", "Move"], 1.0)
         
-        # Désactivation des sécurités de collision (évite le blocage LED Jaune)
-        motion.setExternalCollisionProtectionEnabled("All", False)
-        motion.setStiffnesses("Body", 1.0)
+        arm_names = ["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll", "RWristYaw", "RHand"]
+        head_names = ["HeadYaw", "HeadPitch"]
         
-        current_pitch = 1.0 # Position de base du bras
+        # Votre scénario (inchangé pour garder vos données)
+        scenario = [
+            [[0.6627, -0.0445, 2.0847, 0.0997, -0.0553, 0.9112], [-0.1396, -0.1074], "Etape 1"],
+            [[0.6627, -0.0445, 2.0847, 0.0997, -0.0553, 0.0], [-0.1396, -0.1074], "TOUCHE BAS"],
+            [[0.6642, -0.4893, 2.0801, 0.0951, -0.0721, 0.0404], [-0.0966, -0.1028], "goSide"],
+            [[0.158, -0.8007, 2.0847, 0.0982, -0.0599, 0.0413], [-0.1396, -0.1304], "Etape 3"],
+            [[0.158, -0.8007, 2.0847, 0.0982, -0.0599, 1.0], [-0.1396, -0.1304], "Etape 4"],
+            [[0.0506, -0.201, 2.0847, 0.0107, -0.0844, 0.9112], [-0.1381, -0.1304], "un peu en haut"],
+            [[0.3083, -0.1503, 0.0782, 0.0123, -0.0599, 0.9042], [-0.1381, -0.1304], "TOUCHE HAUT"],
+            [[0.0506, -0.201, 2.0847, 0.0107, -0.0844, 0.9112], [-0.1381, -0.1304], "un peu en haut"],
+            [[0.158, -0.8007, 2.0847, 0.0982, -0.0599, 1.0], [-0.1396, -0.1304], "retour vers départ"],
+            [[0.6642, -0.4893, 2.0801, 0.0951, -0.0721, 0.0404], [-0.0966, -0.1028], "goSide"],
+        ]
+        
+        step_idx = 0
+        # On initialise les angles actuels
+        actual_arm = motion.getAngles("RArm", True)
+        actual_head = motion.getAngles("Head", True)
+        angles = dict(zip(arm_names, actual_arm))
+        angles.update(dict(zip(head_names, actual_head)))
+        
+        move_step = 0.05 
 
         print("\n============================================")
-        print("      CONTROLE PEPPER - VERSION ULTIME      ")
+        print("      CONTROLE PEPPER (BRAS ISOLE)          ")
         print("============================================")
-        print(" Z / S : Avancer / Reculer")
-        print(" Q / D : Gauche / Droite")
-        print(" J / L : Rotation Gauche / Droite")
-        print("--------------------------------------------")
-        print(" I / K : Lever / Baisser le bras (VITESSE MAX)")
-        print(" T     : PARLER (Ouvre la saisie de texte)")
-        print(" 8     : COUP DE POING (PUNCH)")
-        print("--------------------------------------------")
-        print(" 1 : Pierre | 2 : Feuille | 3 : Ciseaux (V-Shape)")
-        print("--------------------------------------------")
-        print(" ESPACE : STOP | CTRL+C : QUITTER")
+        print(" N : Bouger BRAS uniquement | R : Reset")
+        print(" IJKL : Bouger TETE manuellement")
+        print(" A / E : Rotation Gauche / Droite")
+        print(" Z S Q D : Deplacements base")
         print("============================================\n")
 
         while True:
             key = get_key().lower()
             
-            # --- DEPLACEMENTS (ROUES) ---
-            if key == 'z': motion.post.moveTo(0.2, 0.0, 0.0)
+            # --- LOGIQUE SCENARIO (MODIFIÉE) ---
+            if key == 'n':
+                if step_idx < len(scenario):
+                    a_vals, h_vals, msg = scenario[step_idx]
+                    # On n'envoie que les angles du bras (arm_names)
+                    motion.post.setAngles(arm_names, a_vals, 0.1)
+                    print("[>] Etape %d : %s (Bras uniquement)" % (step_idx + 1, msg))
+                    step_idx += 1
+
+            elif key == 'r':
+                step_idx = 0
+                print("\n[!] Scenario remis a zero.")
+
+            # --- MANUEL : BRAS (PAVE NUM) ---
+            elif key == '8': angles["RShoulderPitch"] -= move_step; motion.post.setAngles("RShoulderPitch", angles["RShoulderPitch"], 0.1)
+            elif key == '2': angles["RShoulderPitch"] += move_step; motion.post.setAngles("RShoulderPitch", angles["RShoulderPitch"], 0.1)
+            elif key == '4': angles["RShoulderRoll"] -= move_step; motion.post.setAngles("RShoulderRoll", angles["RShoulderRoll"], 0.1)
+            elif key == '6': angles["RShoulderRoll"] += move_step; motion.post.setAngles("RShoulderRoll", angles["RShoulderRoll"], 0.1)
+            elif key == '7': angles["RElbowRoll"] += move_step; motion.post.setAngles("RElbowRoll", angles["RElbowRoll"], 0.1)
+            elif key == '9': angles["RElbowRoll"] -= move_step; motion.post.setAngles("RElbowRoll", angles["RElbowRoll"], 0.1)
+            elif key == '1': angles["RElbowYaw"] -= move_step; motion.post.setAngles("RElbowYaw", angles["RElbowYaw"], 0.1)
+            elif key == '3': angles["RElbowYaw"] += move_step; motion.post.setAngles("RElbowYaw", angles["RElbowYaw"], 0.1)
+            elif key == '5': motion.post.setAngles("RHand", 1.0, 0.2)
+            elif key == '0': motion.post.setAngles("RHand", 0.0, 0.2)
+
+            # --- MANUEL : TETE (IJKL) ---
+            elif key == 'i': angles["HeadPitch"] -= move_step; motion.post.setAngles("HeadPitch", angles["HeadPitch"], 0.1)
+            elif key == 'k': angles["HeadPitch"] += move_step; motion.post.setAngles("HeadPitch", angles["HeadPitch"], 0.1)
+            elif key == 'j': angles["HeadYaw"] += move_step; motion.post.setAngles("HeadYaw", angles["HeadYaw"], 0.1)
+            elif key == 'l': angles["HeadYaw"] -= move_step; motion.post.setAngles("HeadYaw", angles["HeadYaw"], 0.1)
+
+            # --- ROUES ---
+            elif key == 'z': motion.post.moveTo(0.2, 0.0, 0.0)
             elif key == 's': motion.post.moveTo(-0.2, 0.0, 0.0)
             elif key == 'q': motion.post.moveTo(0.0, 0.1, 0.0)
             elif key == 'd': motion.post.moveTo(0.0, -0.1, 0.0)
-            elif key == 'j': motion.post.moveTo(0.0, 0.0, 0.5)
-            elif key == 'l': motion.post.moveTo(0.0, 0.0, -0.5)
-            
-            # --- BRAS MANUEL (VITESSE 0.8) ---
-            elif key == 'i':
-                current_pitch -= 0.4
-                if current_pitch < -1.5: current_pitch = -1.5
-                motion.setAngles("RShoulderPitch", current_pitch, 0.8)
-            elif key == 'k':
-                current_pitch += 0.4
-                if current_pitch > 1.5: current_pitch = 1.5
-                motion.setAngles("RShoulderPitch", current_pitch, 0.8)
+            elif key == 'a': motion.post.moveTo(0.0, 0.0, 0.15) 
+            elif key == 'e': motion.post.moveTo(0.0, 0.0, -0.15) 
 
-            # --- LE PUNCH (TOUCHE 8) ---
-            elif key == '8':
-                print("[Action] Coup de poing !")
-                tts.post.say("Prends ça !")
-                # Armer le bras
-                motion.setAngles(["RHand", "RShoulderPitch", "RElbowRoll", "RShoulderRoll"], [0.0, 0.5, 1.5, -0.2], 0.6)
-                time.sleep(0.4)
-                # Frapper (Vitesse 1.0)
-                motion.setAngles(["RShoulderPitch", "RElbowRoll"], [-0.2, 0.1], 1.0)
-                time.sleep(0.3)
-                # Retour
-                motion.setAngles(["RShoulderPitch", "RElbowRoll", "RShoulderRoll"], [1.0, 0.5, -0.2], 0.5)
-
-            # --- PARLER (TOUCHE T) ---
-            elif key == 't':
+            elif key == 'y':
                 termios.tcsetattr(fd, termios.TCSADRAIN, original_settings)
-                print("\n[Vocal] Entrez votre phrase : "),
-                phrase = raw_input()
-                tts.post.say(phrase)
+                v_arm = [round(a, 4) for a in motion.getAngles("RArm", True)]
+                v_head = [round(a, 4) for a in motion.getAngles("Head", True)]
+                print("\n[%s, %s, \"Message\"]," % (v_arm, v_head))
                 tty.setraw(fd)
 
-            # --- JEU : PIERRE / FEUILLE / CISEAUX ---
-            elif key == '1': # PIERRE
-                motion.setAngles(["RHand", "RWristYaw", "RShoulderPitch"], [0.0, 0.0, 0.5], 0.8)
-                tts.post.say("Pierre !")
-            
-            elif key == '2': # FEUILLE
-                motion.setAngles(["RHand", "RWristYaw", "RShoulderPitch", "RElbowRoll"], [1.0, 0.0, 0.0, 0.0], 0.8)
-                tts.post.say("Feuille !")
-            
-            elif key == '3': # CISEAUX (Astuce visuelle : main sur la tranche)
-                # Pepper ne peut pas isoler l'index et le majeur (1 seul moteur pour la main)
-                # On tourne le poignet a 90 degres pour simuler la forme
-                motion.setAngles(["RHand", "RWristYaw", "RShoulderPitch", "RElbowRoll"], [1.0, 1.5, 0.2, 0.6], 0.8)
-                tts.post.say("Ciseaux !")
-                time.sleep(0.1)
-                motion.setAngles("RElbowRoll", 0.3, 0.8) # Petit mouvement de coupe
-                time.sleep(0.1)
-                motion.setAngles("RElbowRoll", 0.6, 0.8)
+            elif key == 't':
+                termios.tcsetattr(fd, termios.TCSADRAIN, original_settings)
+                phrase = raw_input("\nDire : "); tts.post.say(phrase); tty.setraw(fd)
+            elif key == ' ': motion.stopMove()
+            elif key == '\x03': break
 
-            # --- STOP ET QUITTER ---
-            elif key == ' ':
-                motion.stopMove()
-            elif key == '\x03': # Ctrl+C
-                break
-                
-    except Exception as e:
-        print "\nErreur rencontree :", e
+            # Sécurités
+            angles["HeadPitch"] = max(-0.6, min(0.6, angles["HeadPitch"]))
+            angles["RShoulderRoll"] = max(-1.5, min(-0.1, angles["RShoulderRoll"]))
+
+    except Exception as e: 
+        print "\nErreur :", e
     finally:
-        # Restauration systematique du terminal et des securites
         termios.tcsetattr(fd, termios.TCSADRAIN, original_settings)
         motion.stopMove()
-        motion.setExternalCollisionProtectionEnabled("All", True)
-        print("\nProgramme arrete. Securites Pepper reactivees.")
+        try:
+            life.setAutonomousAbilityEnabled("BasicAwareness", True)
+            life.setAutonomousAbilityEnabled("BackgroundMovement", True)
+            motion.setBreathEnabled("All", True)
+        except: pass
+        print("\nFermeture.")
 
 if __name__ == "__main__":
     main()

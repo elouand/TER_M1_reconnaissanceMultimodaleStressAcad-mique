@@ -4,21 +4,37 @@ import numpy as np
 import threading
 import pyaudio
 import time
-import signal
+import os
+import csv
+from datetime import datetime
 from ctypes import *
- 
+import json
+import keyboard
+
 from vidToVAD import get_visual_vad
 from audToVAD import get_acoustic_vad, get_text_vad
 from MultimodalState import MultimodalState 
 
-# --- VERROUS DE SÉCURITÉ (Évite les crashs CPU 0xC0000005) ---
+THRESHOLD_SILENCE = 500.0   # Seuil de volume pour détecter la voix
+IPU_CHUNKS_LIMIT = 10       # ~300ms de silence requis pour valider une pause
+MIN_PHRASE_CHUNKS = 10      # ~400ms d'audio minimum requis pour justifier un STT (évite les raclements de gorge)
+MAX_PHRASE_CHUNKS = 150
+
+# --- CONFIGURATION ENREGISTREMENT ---
+CSV_DIR = "csv"
+if not os.path.exists(CSV_DIR):
+    os.makedirs(CSV_DIR)
+
+recording = False
+csv_file = None
+csv_writer = None
+
+# --- VERROUS DE SÉCURITÉ ---
 lock_ton = threading.Lock()
 lock_texte = threading.Lock()
 
-# --- SUPPRESSION DES LOGS ALSA ---
-def py_error_handler(filename, line, function, err, fmt):
-    pass
-
+# (Fonctions silence_alsa et py_error_handler inchangées...)
+def py_error_handler(filename, line, function, err, fmt): pass
 def silence_alsa():
     ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
     global c_error_handler
@@ -26,9 +42,7 @@ def silence_alsa():
     try:
         asound = cdll.LoadLibrary('libasound.so.2')
         asound.snd_lib_error_set_handler(c_error_handler)
-    except Exception as e:
-        pass
-
+    except Exception: pass
 silence_alsa()
 
 # --- INITIALISATION ---
@@ -36,103 +50,196 @@ UDP_IP = "0.0.0.0"
 PORT_VIDEO, PORT_AUDIO = 5005, 5006
 state_manager = MultimodalState()
 
-# --- CONFIGURATION RETOUR ROBOT ---
-PEPPER_IP = "192.168.1.101" # À adapter avec l'IP réelle du robot
+PEPPER_NAME = "Pepper.local" 
 PORT_RETOUR = 5007
 sock_retour = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+# --- LOGIQUE D'ENREGISTREMENT ---
+def toggle_recording():
+    global recording, csv_file, csv_writer
+    if not recording:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = os.path.join(CSV_DIR, f"test_{timestamp}.csv")
+        csv_file = open(filename, mode='w', newline='')
+        csv_writer = csv.writer(csv_file)
+        # Header correspondant à ta demande
+        header = ["timestamp", "v", "a", "d", "vv", "av", "dv", "va", "aa", "da", "vt", "at", "dt"]
+        csv_writer.writerow(header)
+        recording = True
+        print(f"--- ⏺ ENREGISTREMENT DÉMARRÉ : {filename} ---")
+    else:
+        recording = False
+        if csv_file:
+            csv_file.close()
+        print("--- ⏹ ENREGISTREMENT ARRÊTÉ ET SAUVEGARDÉ ---")
 
-
-# --- THREAD AUDIO (SYSTÈME DOUBLE BUFFER) ---
+# (Tâches audio_analysis_ton_task et audio_analysis_texte_task inchangées...)
 def run_audio_listening():
     pa = pyaudio.PyAudio()
     audio_stream = pa.open(format=pyaudio.paInt16, channels=1, rate=48000, output=True, frames_per_buffer=1024)
     
     sock_audio = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock_audio.settimeout(1.0) # Permet de vérifier la variable 'running' régulièrement
+    sock_audio.settimeout(1.0)
     sock_audio.bind((UDP_IP, PORT_AUDIO))
     
     buffer_ton = []
-    buffer_texte = []
+    current_phrase_buffer = [] 
+    silence_counter = 0
     
-    print("Écoute audio activée...")
+    print(f"\n--- SYSTÈME PRÊT ---")
+    print(f"Écoute audio activée (Mode IPU Intelligent - Seuil: {THRESHOLD_SILENCE})...")
+    
     while True:
         try:
-            data, _ = sock_audio.recvfrom(8192)
+            data, _ = sock_audio.recvfrom(65535)
             raw = np.frombuffer(data, dtype=np.int16)
+            
+            # SÉCURITÉ CRUCIALE ANTI-HÉLICOPTÈRE
+            if len(raw) % 4 != 0:
+                continue
+                
             raw_reshaped = raw.reshape(-1, 4)
             audio_mono = raw_reshaped.mean(axis=1).astype(np.int16)
             
-            # DÉSACTIVÉ : Évite le larsen mortel avec le Mixage Stéréo
+            # 1. Retour Audio
             audio_stream.write(audio_mono.tobytes()) 
             
-            buffer_ton.append(audio_mono)
-            buffer_texte.append(audio_mono)
+            # 2. Calcul de l'énergie
+            energy = np.abs(audio_mono).mean()
             
-            # 1. ANALYSE DU TON (~ 1 seconde)
+            # --- LOGIQUE IPU INTELLIGENTE ---
+            if energy > THRESHOLD_SILENCE:
+                if len(current_phrase_buffer) == 0:
+                    print("\n[ÉCOUTE] ", end="", flush=True)
+                
+                current_phrase_buffer.append(audio_mono)
+                silence_counter = 0
+                print(".", end="", flush=True) 
+            
+            else:
+                if len(current_phrase_buffer) > 0:
+                    if silence_counter == 0:
+                        print(" [PAUSE] ", end="", flush=True)
+                    
+                    silence_counter += 1
+                    print("-", end="", flush=True)
+                    
+                    # Déclenchement sur silence
+                    if silence_counter >= IPU_CHUNKS_LIMIT:
+                        # Vérification de la longueur minimale
+                        if len(current_phrase_buffer) >= MIN_PHRASE_CHUNKS:
+                            print(f"\n[IPU] Phrase validée ({len(current_phrase_buffer)} chunks). Envoi STT...")
+                            segment_texte = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
+                            threading.Thread(target=audio_analysis_texte_task, args=(segment_texte,), daemon=True).start()
+                        else:
+                            print(f"\n[IPU] Ignoré (Bruit trop court : {len(current_phrase_buffer)} chunks).")
+                        
+                        # Reset après traitement ou annulation
+                        current_phrase_buffer = []
+                        silence_counter = 0
+
+            # --- COUPE-CIRCUIT (Monologue trop long) ---
+            if len(current_phrase_buffer) >= MAX_PHRASE_CHUNKS:
+                print(f"\n[IPU] Monologue continu (Envoi forcé)...")
+                segment_texte = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
+                threading.Thread(target=audio_analysis_texte_task, args=(segment_texte,), daemon=True).start()
+                
+                current_phrase_buffer = []
+                silence_counter = 0
+
+            # --- LOGIQUE TON (Fixe ~ 1 seconde) ---
+            buffer_ton.append(audio_mono)
             if len(buffer_ton) >= 45: 
                 segment_ton = np.concatenate(buffer_ton).astype(np.float32) / 32768.0
                 threading.Thread(target=audio_analysis_ton_task, args=(segment_ton,), daemon=True).start()
                 buffer_ton = []
                 
-            # 2. ANALYSE DU TEXTE (~ 4.2 secondes)
-            if len(buffer_texte) >= 150: 
-                segment_texte = np.concatenate(buffer_texte).astype(np.float32) / 32768.0
-                threading.Thread(target=audio_analysis_texte_task, args=(segment_texte,), daemon=True).start()
-                buffer_texte = []
-                
         except socket.timeout:
             continue
         except Exception as e:
             pass
-            
-    # Nettoyage à la fermeture
-    audio_stream.stop_stream()
-    audio_stream.close()
-    pa.terminate()
-    print("Thread audio fermé proprement.")
 
-# --- TÂCHES ASYNCHRONES ---
 def audio_analysis_ton_task(segment):
-    if not lock_ton.acquire(blocking=False):
-        return
+    if not lock_ton.acquire(blocking=False): return
     try:
         rms = np.sqrt(np.mean(segment**2))
         if rms > 0.01:
             res_aud = get_acoustic_vad(segment, sampling_rate=48000)
             if res_aud:
-                v = (res_aud['valence'] * 2) - 1
-                a = (res_aud['arousal'] * 2) - 1
-                d = (res_aud['dominance'] * 2) - 1
-                state_manager.update("audio", [v, a, d])
-                print(f"[TON] Valence: {res_aud['valence']:.2f} Arousal: {res_aud['arousal']:.2f} Dominance: {res_aud['dominance']:.2f}")
-    finally:
-        lock_ton.release()
+                state_manager.update("audio", [(res_aud['valence']*2)-1, (res_aud['arousal']*2)-1, (res_aud['dominance']*2)-1])
+    finally: lock_ton.release()
 
 def audio_analysis_texte_task(segment):
     if not lock_texte.acquire(blocking=False):
         return
     try:
+        # Vérification du niveau sonore avant traitement lourd
         rms = np.sqrt(np.mean(segment**2))
         if rms > 0.01:
-            texte, _ = get_text_vad(segment)
-            if texte:
-                print(f"[STT] {texte}")
+            # Appel au STT et au VAD Textuel
+            texte, vad_scores = get_text_vad(segment)
+            
+            if texte and texte.strip():
+                print(f"\n[STT] Phrase reconnue : \"{texte}\"")
+                
+                # Si get_text_vad renvoie déjà des scores (ex: via DistilBERT/RoBERTa)
+                if vad_scores:
+                    # Sécurité : on gère la taille de la liste renvoyée par DistilBERT
+                    if len(vad_scores) == 3:
+                        v, a, d = vad_scores
+                    elif len(vad_scores) == 2:
+                        v, a = vad_scores
+                        d = 0.0 # Valeur neutre pour la Dominance manquante
+                    else:
+                        v, a, d = 0.0, 0.0, 0.0
+
+                    state_manager.update("texte", [v, a, d]) 
+                    print(f"[VAD TEXTE] V: {v:.2f} | A: {a:.2f} | D: {d:.2f}")
+            else:
+                print("\n[STT] Aucune parole intelligible détectée dans le segment.")
+    except Exception as e:
+        print(f"\n[ERREUR STT] : {e}")
     finally:
         lock_texte.release()
 
+def envoyer_debug_robot(vad_scores, face_found, mouvement=False):
+    try:
+        target_ip = socket.gethostbyname(PEPPER_NAME)
+        if face_found and vad_scores is not None:
+            v, a, d = vad_scores
+            data = {
+                "status": "ok",
+                "v": round(float(v), 2),    
+                "a": round(float(a), 2),
+                "d": round(float(d), 2),
+                "move": mouvement # On ajoute la clé move ici
+            }
+        else:
+            data = {"status": "none", "move": mouvement}
+            
+        sock_retour.sendto(json.dumps(data).encode('utf-8'), (target_ip, PORT_RETOUR))
+    except: pass
+
 # --- BOUCLE PRINCIPALE ---
 def main():
-    # Démarrage du thread audio
-    t_audio = threading.Thread(target=run_audio_listening, daemon=True)
-    t_audio.start()
-    
+    global recording, csv_writer
+    threading.Thread(target=run_audio_listening, daemon=True).start()
     sock_video = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock_video.bind((UDP_IP, PORT_VIDEO))
-    
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-
+    last_robot_update = 0
     print("--- Système Multimodal Prêt ---")
+    print("TOUCHES : [R] Enregistrer | [M] Mouvement | [Q] Quitter")
+    mouvement_commande = False
+
+    # ... (imports et init identiques)
+
+    def mouvementBras():
+        # Fonction de test pour simuler un mouvement de bras
+        print("Simuler mouvement de bras (fonction à implémenter selon ton robot)")
+        # Ici tu pourrais envoyer une commande spécifique à Pepper pour faire bouger les bras
+        # Par exemple, en utilisant une librairie de contrôle de Pepper ou en envoyant un message spécifique via socket
+
 
     try:
         while True:
@@ -141,32 +248,64 @@ def main():
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if frame is not None:
-                # Correction Pepper
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 
-                # IA Vision
+                # 1. Mise à jour Vision
                 v_v, a_v, d_v = get_visual_vad(frame)
                 state_manager.update("vision", [v_v, a_v, d_v])
 
-                # Fusion
+                # 2. Calcul de la Fusion (VAD final)
                 v_f, a_f, d_f = state_manager.get_fusion()
-    
-                # Dessin
+                
+                # 3. Extraction des données pour le CSV (Sécurisée)
+                # On récupère les valeurs actuelles pour chaque modalité
+                vv, av, dv = state_manager.data["vision"][:3]
+                va, aa, da = state_manager.data["audio"][:3]
+                vt, at, dt = state_manager.data["texte"][:3]
+
+                # 4. Écriture CSV si l'enregistrement est actif
+                if recording and csv_writer:
+                    # On crée la ligne avec : Time, Final(VAD), Vision(VAD), Audio(VAD), Texte(VAD)
+                    row = [time.time(), v_f, a_f, d_f, vv, av, dv, va, aa, da, vt, at, dt]
+                    csv_writer.writerow(row)
+
+                # 5. Gestion du Robot
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
-                
+                visage_detecte = len(faces) > 0
+
+                if time.time() - last_robot_update > 0.2:
+                    envoyer_debug_robot([v_f, a_f, d_f], visage_detecte, mouvement_commande)
+                    mouvement_commande = False
+                    last_robot_update = time.time()
+
+                # 6. Affichage écran PC
                 for (x, y, w, h) in faces:
-                    color = (0, 255, 0) if v_f >= 0 else (0, 0, 255)
-                    cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-                    label = f"V:{v_f:.2f} A:{a_f:.2f} D:{d_f:.2f}"
-                    cv2.putText(frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                    break
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    cv2.putText(frame, f"FUSION V:{v_f:.2f} A:{a_f:.2f}", (x, y-10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                 
+                if recording:
+                    cv2.circle(frame, (30, 30), 10, (0, 0, 255), -1) # Point rouge REC
+                    cv2.putText(frame, "ENREGISTREMENT...", (50, 40), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
                 cv2.imshow("Analyse Multimodale", frame)
                 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # Gestion des touches clavier
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('m') or key == ord('M'):
+                mouvement_commande = True
+                print("--> Commande MOUVEMENT envoyée !")
+            elif key == ord('q'): 
                 break
+            elif key == ord('r'): 
+                toggle_recording()
+
     finally:
+        # On ferme proprement le fichier si on quitte pendant un enregistrement
+        if recording:
+            toggle_recording()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":

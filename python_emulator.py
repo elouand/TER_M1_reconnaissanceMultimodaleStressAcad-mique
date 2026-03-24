@@ -13,6 +13,9 @@ RATE = 48000
 CHUNK = 1024 
 WIDTH, HEIGHT = 640, 480 
 
+FPS_CIBLE = 5  # Nombre d'images par seconde souhaité
+DELAY = int(1000 / FPS_CIBLE)
+
 # Initialisation Sockets
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -65,6 +68,9 @@ try:
             sock.sendto(combined.tobytes(), (TARGET_IP, PORT_AUDIO))
         except Exception as e:
             pass
+
+        if cv2.waitKey(DELAY) & 0xFF == ord('q'):
+            break
 
 except KeyboardInterrupt:
     print("\nArrêt de l'émulateur.")

@@ -9,13 +9,16 @@ import csv
 from datetime import datetime
 from ctypes import *
 import json
+import matplotlib
+matplotlib.use('Agg') # Force Matplotlib à ne pas ouvrir de fenêtre
+import matplotlib.pyplot as plt
 import keyboard
 
 from vidToVAD import get_visual_vad
 from audToVAD import get_acoustic_vad, get_text_vad
 from MultimodalState import MultimodalState 
 
-THRESHOLD_SILENCE = 500.0   # Seuil de volume pour détecter la voix
+THRESHOLD_SILENCE =500.0   # Seuil de volume pour détecter la voix
 IPU_CHUNKS_LIMIT = 10       # ~300ms de silence requis pour valider une pause
 MIN_PHRASE_CHUNKS = 10      # ~400ms d'audio minimum requis pour justifier un STT (évite les raclements de gorge)
 MAX_PHRASE_CHUNKS = 150
@@ -73,49 +76,72 @@ def toggle_recording():
             csv_file.close()
         print("--- ⏹ ENREGISTREMENT ARRÊTÉ ET SAUVEGARDÉ ---")
 
-# (Tâches audio_analysis_ton_task et audio_analysis_texte_task inchangées...)
+def analyser_bruit_pepper(buffer_audio, rate=48000):
+    """ Génère et sauvegarde le spectre fréquentiel sans bloquer le programme """
+    try:
+        print("\n[DIAGNOSTIC] Analyse spectrale en cours (Sauvegarde en image)...")
+        segment = np.concatenate(buffer_audio).astype(np.float32) / 32768.0
+        n = len(segment)
+        freq = np.fft.rfftfreq(n, d=1./rate)
+        spectre = np.abs(np.fft.rfft(segment))
+
+        plt.figure(figsize=(12, 6))
+        plt.semilogy(freq, spectre) 
+        plt.title("Spectre Sonore de Pepper (Diagnostic Bruit)")
+        plt.xlabel("Fréquence (Hz)")
+        plt.ylabel("Intensité")
+        plt.xlim(0, 8000) # Concentrons-nous sur la zone de la voix
+        plt.grid(True, which="both", alpha=0.3)
+        plt.axvline(x=150, color='r', linestyle='--', label='Coupure Basse conseillée')
+        plt.legend()
+        
+        # Sauvegarde le fichier dans ton dossier actuel
+        filename = "diagnostic_bruit.png"
+        plt.savefig(filename)
+        plt.close()
+        print(f"[DIAGNOSTIC] Analyse terminée. Fichier généré : {filename}")
+    except Exception as e:
+        print(f"[ERREUR DIAGNOSTIC] {e}")
+
 def run_audio_listening():
     pa = pyaudio.PyAudio()
-    audio_stream = pa.open(format=pyaudio.paInt16, channels=1, rate=48000, output=True, frames_per_buffer=1024)
-    
+    audio_stream = pa.open(format=pyaudio.paInt16, channels=1, rate=48000, output=True)
     sock_audio = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock_audio.settimeout(1.0)
     sock_audio.bind((UDP_IP, PORT_AUDIO))
     
-    buffer_ton = []
-    current_phrase_buffer = [] 
+    current_phrase_buffer = []
+    diag_buffer = [] # Buffer pour le diagnostic
     silence_counter = 0
-    
-    print(f"\n--- SYSTÈME PRÊT ---")
-    print(f"Écoute audio activée (Mode IPU Intelligent - Seuil: {THRESHOLD_SILENCE})...")
+    start_phrase_time = 0
+
+    print(f"\n--- ÉCOUTE AUDIO ACTIVÉE ---")
+    print("Astuce : Le programme collectera les 2 premières secondes pour analyse...")
     
     while True:
         try:
             data, _ = sock_audio.recvfrom(65535)
-            raw = np.frombuffer(data, dtype=np.int16)
+            audio_mono = np.frombuffer(data, dtype=np.int16)
+            audio_stream.write(audio_mono.tobytes())
             
-            # SÉCURITÉ CRUCIALE ANTI-HÉLICOPTÈRE
-            if len(raw) % 4 != 0:
-                continue
-                
-            raw_reshaped = raw.reshape(-1, 4)
-            audio_mono = raw_reshaped.mean(axis=1).astype(np.int16)
-            
-            # 1. Retour Audio
-            audio_stream.write(audio_mono.tobytes()) 
-            
-            # 2. Calcul de l'énergie
+            # --- BLOC DIAGNOSTIC ---
+            # On remplit un buffer de diagnostic tant qu'il n'y a pas de parole
+            if len(diag_buffer) < 100: # Environ 2 secondes de son
+                diag_buffer.append(audio_mono)
+                if len(diag_buffer) == 100:
+                    # On lance l'analyse dans un thread séparé pour ne pas bloquer l'écoute
+                    threading.Thread(target=analyser_bruit_pepper, args=(diag_buffer,)).start()
+            # -----------------------
+
             energy = np.abs(audio_mono).mean()
             
-            # --- LOGIQUE IPU INTELLIGENTE ---
             if energy > THRESHOLD_SILENCE:
                 if len(current_phrase_buffer) == 0:
+                    start_phrase_time = time.time()
                     print("\n[ÉCOUTE] ", end="", flush=True)
                 
                 current_phrase_buffer.append(audio_mono)
                 silence_counter = 0
-                print(".", end="", flush=True) 
-            
+                print(".", end="", flush=True)
             else:
                 if len(current_phrase_buffer) > 0:
                     if silence_counter == 0:
@@ -124,40 +150,18 @@ def run_audio_listening():
                     silence_counter += 1
                     print("-", end="", flush=True)
                     
-                    # Déclenchement sur silence
                     if silence_counter >= IPU_CHUNKS_LIMIT:
-                        # Vérification de la longueur minimale
                         if len(current_phrase_buffer) >= MIN_PHRASE_CHUNKS:
                             print(f"\n[IPU] Phrase validée ({len(current_phrase_buffer)} chunks). Envoi STT...")
-                            segment_texte = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
-                            threading.Thread(target=audio_analysis_texte_task, args=(segment_texte,), daemon=True).start()
+                            segment = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
+                            # Lancement du thread d'analyse texte avec le timestamp original
+                            threading.Thread(target=audio_analysis_texte_task, args=(segment, start_phrase_time), daemon=True).start()
                         else:
-                            print(f"\n[IPU] Ignoré (Bruit trop court : {len(current_phrase_buffer)} chunks).")
+                            print(f"\n[IPU] Ignoré (Bruit trop court).")
                         
-                        # Reset après traitement ou annulation
                         current_phrase_buffer = []
                         silence_counter = 0
-
-            # --- COUPE-CIRCUIT (Monologue trop long) ---
-            if len(current_phrase_buffer) >= MAX_PHRASE_CHUNKS:
-                print(f"\n[IPU] Monologue continu (Envoi forcé)...")
-                segment_texte = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
-                threading.Thread(target=audio_analysis_texte_task, args=(segment_texte,), daemon=True).start()
-                
-                current_phrase_buffer = []
-                silence_counter = 0
-
-            # --- LOGIQUE TON (Fixe ~ 1 seconde) ---
-            buffer_ton.append(audio_mono)
-            if len(buffer_ton) >= 45: 
-                segment_ton = np.concatenate(buffer_ton).astype(np.float32) / 32768.0
-                threading.Thread(target=audio_analysis_ton_task, args=(segment_ton,), daemon=True).start()
-                buffer_ton = []
-                
-        except socket.timeout:
-            continue
-        except Exception as e:
-            pass
+        except: continue
 
 def audio_analysis_ton_task(segment):
     if not lock_ton.acquire(blocking=False): return
@@ -169,77 +173,57 @@ def audio_analysis_ton_task(segment):
                 state_manager.update("audio", [(res_aud['valence']*2)-1, (res_aud['arousal']*2)-1, (res_aud['dominance']*2)-1])
     finally: lock_ton.release()
 
-def audio_analysis_texte_task(segment):
-    if not lock_texte.acquire(blocking=False):
-        return
+def audio_analysis_texte_task(segment, start_time):
+    """ Analyse STT + VA Textuel déclenchée par la fin d'une phrase """
     try:
-        # Vérification du niveau sonore avant traitement lourd
-        rms = np.sqrt(np.mean(segment**2))
-        if rms > 0.01:
-            # Appel au STT et au VAD Textuel
-            texte, vad_scores = get_text_vad(segment)
+        # Appel à ton moteur STT (ex: Whisper + DistilBERT)
+        texte, va_scores = get_text_vad(segment) 
+        
+        if texte and va_scores:
+            # 1. Mise à jour de la modalité texte (VA uniquement)
+            state_manager.update("texte", va_scores[:2])
             
-            if texte and texte.strip():
-                print(f"\n[STT] Phrase reconnue : \"{texte}\"")
-                
-                # Si get_text_vad renvoie déjà des scores (ex: via DistilBERT/RoBERTa)
-                if vad_scores:
-                    # Sécurité : on gère la taille de la liste renvoyée par DistilBERT
-                    if len(vad_scores) == 3:
-                        v, a, d = vad_scores
-                    elif len(vad_scores) == 2:
-                        v, a = vad_scores
-                        d = 0.0 # Valeur neutre pour la Dominance manquante
-                    else:
-                        v, a, d = 0.0, 0.0, 0.0
-
-                    state_manager.update("texte", [v, a, d]) 
-                    print(f"[VAD TEXTE] V: {v:.2f} | A: {a:.2f} | D: {d:.2f}")
-            else:
-                print("\n[STT] Aucune parole intelligible détectée dans le segment.")
+            # 2. Calcul de la FUSION SYNCHRONISÉE sur le début de la phrase
+            # On va chercher dans les buffers la vision et le ton à 'start_time'
+            va_fusion = state_manager.get_synced_fusion(start_time)
+            
+            print("\n" + "="*30)
+            print("[STT] Phrase: %s" % texte)
+            print("[FUSION SYNC] V: %.2f | A: %.2f" % (va_fusion[0], va_fusion[1]))
+            print("="*30)
+            
+            #envoi au state_manager 
+            state_manager.update("fusion", va_fusion[:2])
+            
+            # 3. On déclenche le mouvement du robot sur la phrase finie
+            envoyer_debug_robot(va_fusion, True, mouvement=True)
+            
     except Exception as e:
-        print(f"\n[ERREUR STT] : {e}")
-    finally:
-        lock_texte.release()
+        print("\nErreur STT Task:", e)
 
-def envoyer_debug_robot(vad_scores, face_found, mouvement=False):
+def envoyer_debug_robot(va_scores, face_found, mouvement=False):
+    """ Envoie les données VA fusionnées au robot Pepper """
     try:
         target_ip = socket.gethostbyname(PEPPER_NAME)
-        if face_found and vad_scores is not None:
-            v, a, d = vad_scores
-            data = {
-                "status": "ok",
-                "v": round(float(v), 2),    
-                "a": round(float(a), 2),
-                "d": round(float(d), 2),
-                "move": mouvement # On ajoute la clé move ici
-            }
-        else:
-            data = {"status": "none", "move": mouvement}
-            
+        data = {
+            "status": "ok" if face_found else "none",
+            "v": round(float(va_scores[0]), 2),
+            "a": round(float(va_scores[1]), 2),
+            "move": mouvement
+        }
         sock_retour.sendto(json.dumps(data).encode('utf-8'), (target_ip, PORT_RETOUR))
-    except: pass
+    except Exception as e:
+        print("Erreur envoi Pepper:", e)
 
 # --- BOUCLE PRINCIPALE ---
 def main():
-    global recording, csv_writer
     threading.Thread(target=run_audio_listening, daemon=True).start()
     sock_video = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock_video.bind((UDP_IP, PORT_VIDEO))
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     last_robot_update = 0
-    print("--- Système Multimodal Prêt ---")
-    print("TOUCHES : [R] Enregistrer | [M] Mouvement | [Q] Quitter")
-    mouvement_commande = False
 
-    # ... (imports et init identiques)
-
-    def mouvementBras():
-        # Fonction de test pour simuler un mouvement de bras
-        print("Simuler mouvement de bras (fonction à implémenter selon ton robot)")
-        # Ici tu pourrais envoyer une commande spécifique à Pepper pour faire bouger les bras
-        # Par exemple, en utilisant une librairie de contrôle de Pepper ou en envoyant un message spécifique via socket
-
+    print("--- SYSTEME MULTIMODAL VA PRÊT (AVEC LOGS) ---")
 
     try:
         while True:
@@ -250,62 +234,25 @@ def main():
             if frame is not None:
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 
-                # 1. Mise à jour Vision
-                v_v, a_v, d_v = get_visual_vad(frame)
-                state_manager.update("vision", [v_v, a_v, d_v])
+                # Mise à jour Vision
+                va_v = get_visual_vad(frame)
+                state_manager.update("vision", va_v[:2])
 
-                # 2. Calcul de la Fusion (VAD final)
-                v_f, a_f, d_f = state_manager.get_fusion()
-                
-                # 3. Extraction des données pour le CSV (Sécurisée)
-                # On récupère les valeurs actuelles pour chaque modalité
-                vv, av, dv = state_manager.data["vision"][:3]
-                va, aa, da = state_manager.data["audio"][:3]
-                vt, at, dt = state_manager.data["texte"][:3]
-
-                # 4. Écriture CSV si l'enregistrement est actif
-                if recording and csv_writer:
-                    # On crée la ligne avec : Time, Final(VAD), Vision(VAD), Audio(VAD), Texte(VAD)
-                    row = [time.time(), v_f, a_f, d_f, vv, av, dv, va, aa, da, vt, at, dt]
-                    csv_writer.writerow(row)
-
-                # 5. Gestion du Robot
+                # Detection visage
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
-                visage_detecte = len(faces) > 0
-
-                if time.time() - last_robot_update > 0.2:
-                    envoyer_debug_robot([v_f, a_f, d_f], visage_detecte, mouvement_commande)
-                    mouvement_commande = False
+                
+                # Envoi tablette (toutes les 500ms)
+                if time.time() - last_robot_update > 0.5:
+                    # FIX : on unpacke seulement 2 valeurs maintenant
+                    v_now, a_now = state_manager.get_fusion() 
+                    envoyer_debug_robot([v_now, a_now], len(faces) > 0, mouvement=False)
                     last_robot_update = time.time()
 
-                # 6. Affichage écran PC
-                for (x, y, w, h) in faces:
-                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    cv2.putText(frame, f"FUSION V:{v_f:.2f} A:{a_f:.2f}", (x, y-10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.imshow("Analyse VA", frame)
                 
-                if recording:
-                    cv2.circle(frame, (30, 30), 10, (0, 0, 255), -1) # Point rouge REC
-                    cv2.putText(frame, "ENREGISTREMENT...", (50, 40), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-                cv2.imshow("Analyse Multimodale", frame)
-                
-            # Gestion des touches clavier
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('m') or key == ord('M'):
-                mouvement_commande = True
-                print("--> Commande MOUVEMENT envoyée !")
-            elif key == ord('q'): 
-                break
-            elif key == ord('r'): 
-                toggle_recording()
-
+            if cv2.waitKey(1) & 0xFF == ord('q'): break
     finally:
-        # On ferme proprement le fichier si on quitte pendant un enregistrement
-        if recording:
-            toggle_recording()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":

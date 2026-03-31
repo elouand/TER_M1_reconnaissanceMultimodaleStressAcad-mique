@@ -52,7 +52,7 @@ class EmotionModel(Wav2Vec2PreTrainedModel):
 
 # --- CHARGEMENT ---
 PATH_LOCAL = "./modele_ton"
-device = 'cpu'
+device = 'cuda'
 
 print("Chargement du modèle local audEERING (Wav2Vec2-Large-Robust)...")
 processor = Wav2Vec2Processor.from_pretrained(PATH_LOCAL)
@@ -94,7 +94,7 @@ def get_acoustic_vad(audio_numpy, sampling_rate=48000):
         return None
     
 print("Chargement du modèle STT (Whisper)...")
-stt_model = whisper.load_model("turbo")
+stt_model = whisper.load_model("base")
 
 print("Chargement du modèle NLP (DistilBERT)...")
 PATH_NLP = "./modele_texte"

@@ -98,11 +98,18 @@ stt_model = whisper.load_model("base")
 
 print("Chargement du modèle NLP (DistilBERT)...")
 PATH_NLP = "./modele_texte"
-nlp_tokenizer = AutoTokenizer.from_pretrained(PATH_NLP)
-nlp_model = AutoModelForSequenceClassification.from_pretrained(PATH_NLP).to(device)
+nlp_tokenizer = AutoTokenizer.from_pretrained(PATH_NLP, local_files_only=True)
+
+# On ajoute ignore_mismatched_sizes=True au cas où la tête de classification 
+# a été sauvegardée avec une config légèrement différente
+nlp_model = AutoModelForSequenceClassification.from_pretrained(
+    PATH_NLP, 
+    local_files_only=True,
+    ignore_mismatched_sizes=True 
+).to(device)
 nlp_model.eval()
 
-def get_text_vad(audio_segment, orig_sr=48000):
+def get_text_vad(audio_segment, orig_sr=16000):
     try:
         # 1. Resampling
         audio_16k = librosa.resample(audio_segment, orig_sr=orig_sr, target_sr=16000)
@@ -127,7 +134,14 @@ def get_text_vad(audio_segment, orig_sr=48000):
             return None, [0.0, 0.0, 0.0]
             
         # 4. Inférence NLP (DistilBERT)
-        inputs = nlp_tokenizer(texte, return_tensors="pt", truncation=True, padding=True).to(device)
+        # On ajoute padding et truncation explicitement
+        inputs = nlp_tokenizer(
+            texte, 
+            return_tensors="pt", 
+            truncation=True, 
+            padding="max_length", # Forcer une longueur fixe peut aider avec JACK/PyTorch
+            max_length=512
+        ).to(device)
         with torch.no_grad():
             outputs = nlp_model(**inputs)
             

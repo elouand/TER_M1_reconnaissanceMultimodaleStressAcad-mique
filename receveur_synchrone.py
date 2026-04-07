@@ -237,9 +237,9 @@ def enregistrer_wav_diagnostic(buffer_audio, rate=16000):
         print(f"[ERREUR WAV] {e}")
 
 def run_audio_listening():
-    pa = pyaudio.PyAudio()
+    # pa = pyaudio.PyAudio()
     # Mise à jour du flux de sortie audio pour écouter en 16kHz
-    audio_stream = pa.open(format=pyaudio.paInt16, channels=1, rate=int(SAMPLE_RATE), output=True)
+    # audio_stream = pa.open(format=pyaudio.paInt16, channels=1, rate=int(SAMPLE_RATE), output=True)
     sock_audio = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock_audio.bind((UDP_IP, PORT_AUDIO))
     
@@ -267,7 +267,7 @@ def run_audio_listening():
             audio_mono = apply_smart_denoise(raw_audio)
             
             # Retour Audio (Tu entends le son filtré en 16k)
-            audio_stream.write(audio_mono.tobytes())
+            # audio_stream.write(audio_mono.tobytes())
             
             energy = np.abs(audio_mono).mean()
             
@@ -338,6 +338,8 @@ def audio_analysis_texte_task(segment, start_time):
             
             # 3. On déclenche le mouvement du robot sur la phrase finie
             envoyer_debug_robot(va_fusion, True, mouvement=True)
+        else:
+            print("\n[STT] Whisper n'a pas compris la phrase (bruit parasite ou texte trop court).")
             
     except Exception as e:
         print("\nErreur STT Task:", e)
@@ -367,12 +369,12 @@ def main():
     print("--- SYSTEME MULTIMODAL VA PRÊT (AVEC LOGS) ---")
 
     try:
+        nb_frame_logs = 0
         while True:
             last_face_log = 0
             data_v, _ = sock_video.recvfrom(65535)
             nparr = np.frombuffer(data_v, np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            nb_frame_logs = 0
             
             if frame is not None:
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -404,7 +406,12 @@ def main():
 
                 cv2.imshow("Analyse VA", frame)
                 
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
+            key = cv2.waitKey(1) & 0xFF
+                
+            if key == ord('q'): # Quitter
+                break
+            elif key == ord('s'): # Appuyer sur 's' pour démarrer/arrêter l'enregistrement
+                toggle_recording()
     finally:
         cv2.destroyAllWindows()
 

@@ -8,3 +8,6 @@ torchvision
 timm
 protobuf
 openai-whisper
+matplotlib
+noisereduce
+hsemotion

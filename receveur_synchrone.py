@@ -345,6 +345,7 @@ def audio_analysis_texte_task(segment, start_time):
 def envoyer_debug_robot(va_scores, face_found, mouvement=False):
     """ Envoie les données VA fusionnées au robot Pepper """
     try:
+        print("envoie du message au robot")
         target_ip = socket.gethostbyname(PEPPER_NAME)
         data = {
             "status": "ok" if face_found else "none",
@@ -392,7 +393,6 @@ def main():
 
                 if visage_detecte: #
                     if time.time() - last_face_log > 1.0: # Log toutes les secondes
-                        print(f"  \n [VISAGE] V: {va_v[0]:+.2f} | A: {va_v[1]:+.2f}")
                         last_face_log = time.time()
                 
                 # Envoi tablette (toutes les 500ms)

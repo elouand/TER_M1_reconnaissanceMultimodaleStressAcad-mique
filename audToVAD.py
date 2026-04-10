@@ -59,7 +59,7 @@ processor = Wav2Vec2Processor.from_pretrained(PATH_LOCAL)
 model = EmotionModel.from_pretrained(PATH_LOCAL).to(device)
 model.eval()
 
-def get_acoustic_vad(audio_numpy, sampling_rate=48000):
+def get_acoustic_vad(audio_numpy, sampling_rate=16000):
     """
     Predict emotions: arousal, dominance, valence (0...1).
     """
@@ -102,7 +102,7 @@ nlp_tokenizer = AutoTokenizer.from_pretrained(PATH_NLP)
 nlp_model = AutoModelForSequenceClassification.from_pretrained(PATH_NLP).to(device)
 nlp_model.eval()
 
-def get_text_vad(audio_segment, orig_sr=48000):
+def get_text_vad(audio_segment, orig_sr=16000):
     try:
         # 1. Resampling
         audio_16k = librosa.resample(audio_segment, orig_sr=orig_sr, target_sr=16000)

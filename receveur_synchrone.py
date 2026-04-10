@@ -103,7 +103,7 @@ def toggle_recording():
         csv_file = open(filename, mode='w', newline='')
         csv_writer = csv.writer(csv_file)
         # Header correspondant à ta demande
-        header = ["timestamp", "v", "a", "d", "vv", "av", "dv", "va", "aa", "da", "vt", "at", "dt"]
+        header = ["timestamp", "v", "a", "vv", "av", "va", "aa", "vt", "at", "mark"]
         csv_writer.writerow(header)
         recording = True
         print(f"--- ⏺ ENREGISTREMENT DÉMARRÉ : {filename} ---")
@@ -112,6 +112,35 @@ def toggle_recording():
         if csv_file:
             csv_file.close()
         print("--- ⏹ ENREGISTREMENT ARRÊTÉ ET SAUVEGARDÉ ---")
+
+def log_to_csv(mark_value=0):
+    global recording, csv_writer
+    if recording and csv_writer:
+        try:
+            now = time.time()
+            # On récupère toutes les variables depuis le state_manager
+            vf, af = state_manager.current_fusion
+            vv, av = state_manager.data["vision"]
+            va, aa = state_manager.data["audio"]
+            vt, at = state_manager.data["texte"]
+            
+            # Ligne à écrire (Format: timestamp, v, a, vv, av, va, aa, vt, at, mark)
+            row = [now, vf, af, vv, av, va, aa, vt, at, mark_value]
+            csv_writer.writerow(row)
+        except Exception as e:
+            print(f"Erreur d'écriture CSV: {e}")
+
+def log_historical_to_csv(t_timestamp, fusion, vision, audio, texte, mark_value=0):
+    """ Écrit une ligne CSV pour le découpage rétroactif """
+    global recording, csv_writer
+    if recording and csv_writer:
+        try:
+            row = [t_timestamp, fusion[0], fusion[1], 
+                   vision[0], vision[1], audio[0], audio[1], 
+                   texte[0], texte[1], mark_value]
+            csv_writer.writerow(row)
+        except Exception as e:
+            print(f"Erreur d'écriture CSV Historique: {e}")
 
 def analyser_bruit_pepper(buffer_audio, rate=16000):
     """ Génère un graphique comparatif Avant/Après filtrage """
@@ -281,6 +310,10 @@ def run_audio_listening():
                     current_phrase_buffer.append(audio_mono)
                     silence_counter = 0
                     print(".", end="", flush=True)
+
+                    if len(current_phrase_buffer) % 15 == 0:
+                        segment_ton = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
+                        threading.Thread(target=audio_analysis_ton_task, args=(segment_ton,), daemon=True).start()
                 else:
                     if len(current_phrase_buffer) > 0:
                         if silence_counter == 0:
@@ -293,7 +326,10 @@ def run_audio_listening():
                             if len(current_phrase_buffer) >= MIN_PHRASE_CHUNKS:
                                 print(f"\n[IPU] Phrase validée ({len(current_phrase_buffer)} chunks). Envoi STT...")
                                 segment = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
-                                threading.Thread(target=audio_analysis_texte_task, args=(segment, start_phrase_time), daemon=True).start()
+                                
+                                # --- NOUVEAU : On capture la fin de la phrase ---
+                                end_phrase_time = time.time()
+                                threading.Thread(target=audio_analysis_texte_task, args=(segment, start_phrase_time, end_phrase_time), daemon=True).start()
                             else:
                                 print(f"\n[IPU] Ignoré (Bruit trop court).")
                             
@@ -308,11 +344,11 @@ def audio_analysis_ton_task(segment):
         if rms > 0.01:
             res_aud = get_acoustic_vad(segment, sampling_rate=16000)
             if res_aud:
-                print(f"on envoie à state_manager audio : {[(res_aud['valence']*2)-1, (res_aud['arousal']*2)-1]}")
+                print(f"\n {time.time()} - Ton acoustique : V={res_aud['valence']:.2f}, A={res_aud['arousal']:.2f}")
                 state_manager.update("audio", [(res_aud['valence']*2)-1, (res_aud['arousal']*2)-1])
     finally: lock_ton.release()
 
-def audio_analysis_texte_task(segment, start_time):
+def audio_analysis_texte_task(segment, start_time, end_time):
     """ Analyse STT + VA Textuel déclenchée par la fin d'une phrase """
     try:
         # Appel à ton moteur STT (ex: Whisper + DistilBERT)
@@ -322,22 +358,24 @@ def audio_analysis_texte_task(segment, start_time):
             # 1. Mise à jour de la modalité texte (VA uniquement)
             print(f"\n on envoie à state_manager text : {va_scores[:2]}")
             state_manager.update("texte", va_scores[:2])
+
+            print(f"\n--- DÉCOUPAGE RÉTROACTIF (Tranches de 2s) ---")
+            current_start = start_time
+            fusion_finale = np.array([0.0, 0.0])
             
-            # 2. Calcul de la FUSION SYNCHRONISÉE sur le début de la phrase
-            # On va chercher dans les buffers la vision et le ton à 'start_time'
-            va_fusion = state_manager.get_synced_fusion(start_time)
+            while current_start < end_time:
+                current_end = min(current_start + 2.0, end_time)
+                fusion, v_v, v_a, v_t = state_manager.get_detailed_state_window(current_start, current_end)
+                log_historical_to_csv(current_end, fusion, v_v, v_a, v_t, mark_value=0)
+                duree_tranche = current_end - current_start
+                print(f" -> Tranche {duree_tranche:.1f}s | FUS: {fusion[0]:+.2f}, {fusion[1]:+.2f} | VIS: {v_v[0]:+.2f}, {v_v[1]:+.2f} | TON: {v_a[0]:+.2f}, {v_a[1]:+.2f}")
+                current_start += 2.0
+                fusion_finale = fusion # On garde la dernière pour l'envoi au robot
             
-            print("\n" + "="*30)
-            print("[STT] Phrase: %s" % texte)
-            print("[FUSION SYNC] V: %.2f | A: %.2f" % (va_fusion[0], va_fusion[1]))
-            print("="*30)
-            
-            #envoi au state_manager 
-            print(f"\n on envoie à state_manager fusion finale : {va_fusion[:2]}")
-            state_manager.update("fusion", va_fusion[:2])
-            
-            # 3. On déclenche le mouvement du robot sur la phrase finie
-            envoyer_debug_robot(va_fusion, True, mouvement=True)
+            print("---------------------------------------------\n")
+
+            state_manager.current_fusion = fusion_finale
+            envoyer_debug_robot(fusion_finale, True, mouvement=False)
             
     except Exception as e:
         print("\nErreur STT Task:", e)
@@ -364,27 +402,19 @@ def main():
     sock_video.bind((UDP_IP, PORT_VIDEO))
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     last_robot_update = 0
+    last_face_log = 0
+    nb_frame_logs = 0
 
     print("--- SYSTEME MULTIMODAL VA PRÊT (AVEC LOGS) ---")
 
     try:
         while True:
-            last_face_log = 0
             data_v, _ = sock_video.recvfrom(65535)
             nparr = np.frombuffer(data_v, np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            nb_frame_logs = 0
             
             if frame is not None:
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                
-                # Mise à jour Vision
-                va_v = get_visual_vad(frame)
-                if nb_frame_logs == 200 :
-                    print(f"\n on envoie à state_manager vision : {va_v[:2]}")
-                    nb_frame_logs = 0
-                nb_frame_logs += 1
-                state_manager.update("vision", va_v[:2])
 
                 # Detection visage
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -392,19 +422,39 @@ def main():
                 visage_detecte = len(faces) > 0
 
                 if visage_detecte: #
+                    # Mise à jour Vision
+                    va_v = get_visual_vad(frame)
+
+                    nb_frame_logs += 1
+
+                    if nb_frame_logs >= 200 :
+                        print(f"\n on envoie à state_manager vision : {va_v[:2]}")
+                        nb_frame_logs = 0
+
+                
+                    state_manager.update("vision", va_v[:2])
                     if time.time() - last_face_log > 1.0: # Log toutes les secondes
+                        
                         last_face_log = time.time()
                 
                 # Envoi tablette (toutes les 500ms)
                 if time.time() - last_robot_update > 0.5:
                     # FIX : on unpacke seulement 2 valeurs maintenant
                     v_now, a_now = state_manager.get_fusion() 
-                    envoyer_debug_robot([v_now, a_now], len(faces) > 0, mouvement=False)
                     last_robot_update = time.time()
 
                 cv2.imshow("Analyse VA", frame)
                 
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord('q'): 
+                break
+            elif key == ord('r'):
+                print("\n--- TOGGLE ENREGISTREMENT ---")
+                toggle_recording()
+            elif key == ord('m'): # Pour ton bouton mouvement/mark
+                log_to_csv(mark_value=1)
+                envoyer_debug_robot(state_manager.current_fusion, visage_detecte, mouvement=True)
     finally:
         cv2.destroyAllWindows()
 

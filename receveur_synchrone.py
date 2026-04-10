@@ -63,9 +63,17 @@ CSV_DIR = "csv"
 if not os.path.exists(CSV_DIR):
     os.makedirs(CSV_DIR)
 
+# Création du dossier images s'il n'existe pas
+if not os.path.exists("images"):
+    os.makedirs("images")
+
 recording = False
 csv_file = None
 csv_writer = None
+
+# Variables pour le suivi des images
+images_list = []
+current_image_idx = 0
 
 noise_profile = None
 
@@ -95,23 +103,62 @@ PORT_RETOUR = 5007
 sock_retour = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 # --- LOGIQUE D'ENREGISTREMENT ---
-def toggle_recording():
-    global recording, csv_file, csv_writer
-    if not recording:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(CSV_DIR, f"test_{timestamp}.csv")
+def next_image_session():
+    """ 
+    Passe à l'image suivante, affiche son nom, crée son dossier CSV, 
+    démarre l'enregistrement et logue un premier point avec mark=1.
+    """
+    global recording, csv_file, csv_writer, images_list, current_image_idx
+    
+    # 1. Charger la liste des images si elle est vide
+    if not images_list:
+        images_list = [f for f in os.listdir("images") if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        if not images_list:
+            print("\n⚠️ ERREUR : Aucun fichier trouvé dans le dossier 'images/'. Ajoutez des images d d'abord.")
+            return
+
+    # 2. Fermer proprement l'ancien CSV si on était déjà en train d'enregistrer
+    if recording and csv_file:
+        csv_file.close()
+        recording = False
+
+    # 3. Vérifier si on a fait toutes les images
+    if current_image_idx >= len(images_list):
+        print("\n" + "="*50)
+        print("🎉 TOUTES LES IMAGES ONT ÉTÉ DÉCRITES !")
+        print("="*50 + "\n")
+        return
+        
+    # 4. Récupérer le nom de la nouvelle image
+    image_name = images_list[current_image_idx]
+    current_image_idx += 1
+    
+    print("\n" + "*"*50)
+    print(f"👉 NOUVELLE IMAGE À DÉCRIRE : {image_name}")
+    print("*"*50 + "\n")
+    
+    # 5. Créer l'arborescence : csv/nom_de_l_image/
+    image_csv_dir = os.path.join(CSV_DIR, image_name)
+    if not os.path.exists(image_csv_dir):
+        os.makedirs(image_csv_dir)
+        
+    # 6. Créer le fichier CSV
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(image_csv_dir, f"{timestamp}.csv")
+    
+    try:
         csv_file = open(filename, mode='w', newline='')
         csv_writer = csv.writer(csv_file)
-        # Header correspondant à ta demande
         header = ["timestamp", "v", "a", "vv", "av", "va", "aa", "vt", "at", "mark"]
         csv_writer.writerow(header)
         recording = True
+        
+        # 7. Loguer IMMÉDIATEMENT la première ligne avec mark=1
+        log_to_csv(mark_value=1)
         print(f"--- ⏺ ENREGISTREMENT DÉMARRÉ : {filename} ---")
-    else:
-        recording = False
-        if csv_file:
-            csv_file.close()
-        print("--- ⏹ ENREGISTREMENT ARRÊTÉ ET SAUVEGARDÉ ---")
+        
+    except Exception as e:
+        print(f"Erreur lors de la création du CSV de session : {e}")
 
 def log_to_csv(mark_value=0):
     global recording, csv_writer
@@ -450,8 +497,7 @@ def main():
             if key == ord('q'): 
                 break
             elif key == ord('r'):
-                print("\n--- TOGGLE ENREGISTREMENT ---")
-                toggle_recording()
+                next_image_session()
             elif key == ord('m'): # Pour ton bouton mouvement/mark
                 log_to_csv(mark_value=1)
                 envoyer_debug_robot(state_manager.current_fusion, visage_detecte, mouvement=True)

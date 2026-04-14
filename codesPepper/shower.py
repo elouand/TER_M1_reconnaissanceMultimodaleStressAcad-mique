@@ -11,13 +11,12 @@ try:
     myBroker = ALBroker("myBroker", "0.0.0.0", 0, "127.0.0.1", 9559)
 except Exception as e:
     print "Erreur Broker :", e
-    exit(1) # Si le broker échoue, on ne peut rien faire
+    exit(1)
 
 # 2. CRÉER LES PROXYS ENSUITE
 try:
     tts = ALProxy("ALTextToSpeech")
     motion = ALProxy("ALMotion")
-    # Ajout du proxy pour les animations (Etape 2)
     animation = ALProxy("ALAnimationPlayer") 
 except Exception as e:
     print "Erreur lors de la creation des proxys :", e
@@ -42,20 +41,19 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind(("0.0.0.0", PORT_RETOUR))
 
 def reaction_robot():
-    """ Fonction de test pour l'étape 1 """
-    print "EXECUTION MOUVEMENT"
-    # Utilisation de .post pour ne pas bloquer la boucle UDP
-    tts.post.say("mouvement")
-    # Exemple d'animation pour l'étape 2 (à tester si tts fonctionne)
-    # animation.post.run("animations/Stand/Gestures/Hey_1")
+    """ Fermeture de la main (0.0 = fermé, 1.0 = ouvert) """
+    print "EXECUTION MOUVEMENT : Fermeture des mains"
+    try:
+        # Vitesse de 0.2 pour un mouvement net mais pas trop brusque
+        motion.setAngles(["RHand", "LHand"], [0.0, 0.0], 0.2)
+    except Exception as e:
+        print "Erreur mouvement main :", e
 
 print "En attente des donnees sur le port 5007..."
 
 try:
     while True:
         data, addr = sock.recvfrom(1024)
-        # On peut commenter le print suivant si ça flood trop tes logs
-        # print "Paquet recu de %s" % str(addr)
         
         try:
             info = json.loads(data)
@@ -65,12 +63,12 @@ try:
             if info.get("move") == True:
                 reaction_robot()
 
-            # --- AFFICHAGE TABLETTE ---
+            # --- AFFICHAGE TABLETTE (Correction du 'd') ---
             if status == "ok" and tablet:
-                v, a, d = info["v"], info["a"], info["d"]
+                v, a = info["v"], info["a"]
                 cmd = "document.body.style.backgroundColor = 'green'; "
-                cmd += "document.body.innerHTML = '<div style=\"color:white; font-size:50px; text-align:center; margin-top:100px;\">"
-                cmd += "V: %.2f <br> A: %.2f <br> D: %.2f</div>';" % (v, a, d)
+                cmd += "document.body.innerHTML = '<div style=\"color:white; font-size:60px; text-align:center; margin-top:150px;\">"
+                cmd += "V: %.2f <br> A: %.2f</div>';" % (v, a)
                 tablet.executeJS(cmd)
 
             elif status == "none" and tablet:

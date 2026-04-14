@@ -11,6 +11,7 @@ from datetime import datetime
 from ctypes import *
 import json
 import matplotlib
+import random
 matplotlib.use('Agg') # Force Matplotlib à ne pas ouvrir de fenêtre
 import matplotlib.pyplot as plt
 from scipy.signal import butter, lfilter, iirnotch
@@ -98,51 +99,75 @@ UDP_IP = "0.0.0.0"
 PORT_VIDEO, PORT_AUDIO = 5005, 5006
 state_manager = MultimodalState()
 
-PEPPER_NAME = "Pepper.local" 
+PEPPER_NAME = "Pepper.local" # Ou l'IP directe (ex: "192.168.1.50")
+# --- FIX SACCADES : On résout l'IP une seule fois au démarrage ---
+try:
+    PEPPER_IP_RESOLVED = socket.gethostbyname(PEPPER_NAME)
+    print(f"IP du robot trouvée : {PEPPER_IP_RESOLVED}")
+except Exception as e:
+    print(f"Attention, impossible de résoudre {PEPPER_NAME}. On garde l'adresse brute.")
+    PEPPER_IP_RESOLVED = PEPPER_NAME
+# ------------------------------------------------------------------
+
 PORT_RETOUR = 5007
 sock_retour = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
 # --- LOGIQUE D'ENREGISTREMENT ---
-def next_image_session():
+def toggle_image_session():
     """ 
-    Passe à l'image suivante, affiche son nom, crée son dossier CSV, 
-    démarre l'enregistrement et logue un premier point avec mark=1.
+    Bascule (On/Off) l'enregistrement. 
+    Arrête la session en cours ou démarre la session pour l'image suivante.
     """
     global recording, csv_file, csv_writer, images_list, current_image_idx
     
-    # 1. Charger la liste des images si elle est vide
+    # --- CAS 1 : On enregistrait déjà -> On ARRETE ---
+    if recording:
+        recording = False
+        if csv_file:
+            csv_file.close()
+            
+        # On retrouve le nom de l'image qu'on vient de terminer
+        image_terminee = images_list[current_image_idx - 1] if current_image_idx > 0 else "inconnue"
+        
+        print("\n" + "="*50)
+        print(f"⏹️ ENREGISTREMENT ARRÊTÉ pour : {image_terminee}")
+        print("Appuyez de nouveau sur 'r' pour passer à la photo suivante.")
+        print("="*50 + "\n")
+        return
+
+    # --- CAS 2 : On était en pause -> On DÉMARRE la prochaine image ---
+    
+    # 1. Charger la liste des images si c'est le tout début
     if not images_list:
         images_list = [f for f in os.listdir("images") if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
         if not images_list:
-            print("\n⚠️ ERREUR : Aucun fichier trouvé dans le dossier 'images/'. Ajoutez des images d d'abord.")
+            print("\n⚠️ ERREUR : Aucune image trouvée dans le dossier 'images/'.")
             return
+        
+        random.shuffle(images_list)
+        print(f"\n🔀 Liste des {len(images_list)} images mélangée aléatoirement pour ce sujet !")
+        print(f"Vous toucherez sur l'image numero : {random.randint(1,6)} !!!")
 
-    # 2. Fermer proprement l'ancien CSV si on était déjà en train d'enregistrer
-    if recording and csv_file:
-        csv_file.close()
-        recording = False
-
-    # 3. Vérifier si on a fait toutes les images
+    # 2. Vérifier si on a fait toutes les images
     if current_image_idx >= len(images_list):
         print("\n" + "="*50)
         print("🎉 TOUTES LES IMAGES ONT ÉTÉ DÉCRITES !")
         print("="*50 + "\n")
         return
         
-    # 4. Récupérer le nom de la nouvelle image
+    # 3. Récupérer l'image suivante
     image_name = images_list[current_image_idx]
     current_image_idx += 1
     
     print("\n" + "*"*50)
-    print(f"👉 NOUVELLE IMAGE À DÉCRIRE : {image_name}")
-    print("*"*50 + "\n")
+    print(f"👉 NOUVELLE IMAGE AFFICHÉE : {image_name}")
+    print("*"*50)
     
-    # 5. Créer l'arborescence : csv/nom_de_l_image/
+    # 4. Créer l'arborescence (csv/nom_de_l_image/)
     image_csv_dir = os.path.join(CSV_DIR, image_name)
     if not os.path.exists(image_csv_dir):
         os.makedirs(image_csv_dir)
         
-    # 6. Créer le fichier CSV
+    # 5. Préparer le fichier
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = os.path.join(image_csv_dir, f"{timestamp}.csv")
     
@@ -153,10 +178,11 @@ def next_image_session():
         csv_writer.writerow(header)
         recording = True
         
-        # 7. Loguer IMMÉDIATEMENT la première ligne avec mark=1
+        # 6. On logue la première ligne (top départ officiel) avec mark=1
         log_to_csv(mark_value=1)
-        print(f"--- ⏺ ENREGISTREMENT DÉMARRÉ : {filename} ---")
         
+        print(f"--- ⏺ ENREGISTREMENT DÉMARRÉ : {filename} ---")
+        print("🎙️ Le système enregistre maintenant les réactions !")
     except Exception as e:
         print(f"Erreur lors de la création du CSV de session : {e}")
 
@@ -422,25 +448,34 @@ def audio_analysis_texte_task(segment, start_time, end_time):
             print("---------------------------------------------\n")
 
             state_manager.current_fusion = fusion_finale
-            envoyer_debug_robot(fusion_finale, True, mouvement=False)
+            envoyer_debug_robot( True, mouvement=False)
             
     except Exception as e:
         print("\nErreur STT Task:", e)
 
-def envoyer_debug_robot(va_scores, face_found, mouvement=False):
-    """ Envoie les données VA fusionnées au robot Pepper """
+def envoyer_debug_robot(face_found, mouvement=False):
+    """ Envoie TOUTES les modalités VA au robot Pepper """
     try:
-        print("envoie du message au robot")
-        target_ip = socket.gethostbyname(PEPPER_NAME)
+        # On récupère les états actuels dans le state_manager
+        v_fus, a_fus = state_manager.current_fusion
+        v_vis, a_vis = state_manager.data["vision"]
+        v_aud, a_aud = state_manager.data["audio"]
+        v_txt, a_txt = state_manager.data["texte"]
+        
         data = {
             "status": "ok" if face_found else "none",
-            "v": round(float(va_scores[0]), 2),
-            "a": round(float(va_scores[1]), 2),
-            "move": mouvement
+            "move": mouvement,
+            "fus": [round(float(v_fus), 2), round(float(a_fus), 2)],
+            "vis": [round(float(v_vis), 2), round(float(a_vis), 2)],
+            "aud": [round(float(v_aud), 2), round(float(a_aud), 2)],
+            "txt": [round(float(v_txt), 2), round(float(a_txt), 2)]
         }
-        sock_retour.sendto(json.dumps(data).encode('utf-8'), (target_ip, PORT_RETOUR))
+        # On utilise l'IP résolue pour éviter les saccades
+        sock_retour.sendto(json.dumps(data).encode('utf-8'), (PEPPER_IP_RESOLVED, PORT_RETOUR))
     except Exception as e:
-        print("Erreur envoi Pepper:", e )
+        pass
+
+
 
 # --- BOUCLE PRINCIPALE ---
 def main():
@@ -487,9 +522,7 @@ def main():
                 # Envoi tablette (toutes les 500ms)
                 if time.time() - last_robot_update > 0.5:
                     # FIX : on unpacke seulement 2 valeurs maintenant
-                    v_now, a_now = state_manager.get_fusion() 
                     last_robot_update = time.time()
-
                 cv2.imshow("Analyse VA", frame)
                 
             key = cv2.waitKey(1) & 0xFF
@@ -497,10 +530,11 @@ def main():
             if key == ord('q'): 
                 break
             elif key == ord('r'):
-                next_image_session()
+                toggle_image_session()
             elif key == ord('m'): # Pour ton bouton mouvement/mark
+                print("M APPUYE")
                 log_to_csv(mark_value=1)
-                envoyer_debug_robot(state_manager.current_fusion, visage_detecte, mouvement=True)
+                envoyer_debug_robot(visage_detecte, mouvement=True)
     finally:
         cv2.destroyAllWindows()
 

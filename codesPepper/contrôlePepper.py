@@ -24,7 +24,6 @@ def main(robot_ip="127.0.0.1"):
         tts = ALProxy("ALTextToSpeech", robot_ip, 9559)
         life = ALProxy("ALAutonomousLife", robot_ip, 9559)
         
-        # Désactivation des mouvements autonomes pour garder la tablette active
         try:
             life.setAutonomousAbilityEnabled("BasicAwareness", False)
             life.setAutonomousAbilityEnabled("BackgroundMovement", False)
@@ -38,7 +37,6 @@ def main(robot_ip="127.0.0.1"):
         arm_names = ["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll", "RWristYaw", "RHand"]
         head_names = ["HeadYaw", "HeadPitch"]
         
-        # Votre scénario (inchangé pour garder vos données)
         scenario = [
             [[0.6627, -0.0445, 2.0847, 0.0997, -0.0553, 0.9112], [-0.1396, -0.1074], "Etape 1"],
             [[0.6627, -0.0445, 2.0847, 0.0997, -0.0553, 0.0], [-0.1396, -0.1074], "TOUCHE BAS"],
@@ -48,61 +46,71 @@ def main(robot_ip="127.0.0.1"):
             [[0.0506, -0.201, 2.0847, 0.0107, -0.0844, 0.9112], [-0.1381, -0.1304], "un peu en haut"],
             [[0.3083, -0.1503, 0.0782, 0.0123, -0.0599, 0.9042], [-0.1381, -0.1304], "TOUCHE HAUT"],
             [[0.0506, -0.201, 2.0847, 0.0107, -0.0844, 0.9112], [-0.1381, -0.1304], "un peu en haut"],
-            [[0.158, -0.8007, 2.0847, 0.0982, -0.0599, 1.0], [-0.1396, -0.1304], "retour vers départ"],
+            [[0.158, -0.8007, 2.0847, 0.0982, -0.0599, 1.0], [-0.1396, -0.1304], "retour vers depart"],
             [[0.6642, -0.4893, 2.0801, 0.0951, -0.0721, 0.0404], [-0.0966, -0.1028], "goSide"],
         ]
         
         step_idx = 0
-        # On initialise les angles actuels
-        actual_arm = motion.getAngles("RArm", True)
-        actual_head = motion.getAngles("Head", True)
-        angles = dict(zip(arm_names, actual_arm))
-        angles.update(dict(zip(head_names, actual_head)))
-        
         move_step = 0.05 
 
         print("\n============================================")
-        print("      CONTROLE PEPPER (BRAS ISOLE)          ")
+        print("      CONTROLE DYNAMIQUE (POSITION REELLE)  ")
         print("============================================")
-        print(" N : Bouger BRAS uniquement | R : Reset")
-        print(" IJKL : Bouger TETE manuellement")
-        print(" A / E : Rotation Gauche / Droite")
-        print(" Z S Q D : Deplacements base")
+        print(" N : Scenario (Bras) | PAVE : Ajuster Bras")
+        print(" +/- : Ajuster Poignet | Y : Export pos")
+        print(" IJKL : Ajuster Tete | ZSQD/AE : Base")
         print("============================================\n")
 
         while True:
             key = get_key().lower()
             
-            # --- LOGIQUE SCENARIO (MODIFIÉE) ---
+            # --- LOGIQUE SCENARIO ---
             if key == 'n':
                 if step_idx < len(scenario):
                     a_vals, h_vals, msg = scenario[step_idx]
-                    # On n'envoie que les angles du bras (arm_names)
                     motion.post.setAngles(arm_names, a_vals, 0.1)
-                    print("[>] Etape %d : %s (Bras uniquement)" % (step_idx + 1, msg))
+                    print("[>] Etape %d : %s" % (step_idx + 1, msg))
                     step_idx += 1
 
             elif key == 'r':
                 step_idx = 0
                 print("\n[!] Scenario remis a zero.")
 
-            # --- MANUEL : BRAS (PAVE NUM) ---
-            elif key == '8': angles["RShoulderPitch"] -= move_step; motion.post.setAngles("RShoulderPitch", angles["RShoulderPitch"], 0.1)
-            elif key == '2': angles["RShoulderPitch"] += move_step; motion.post.setAngles("RShoulderPitch", angles["RShoulderPitch"], 0.1)
-            elif key == '4': angles["RShoulderRoll"] -= move_step; motion.post.setAngles("RShoulderRoll", angles["RShoulderRoll"], 0.1)
-            elif key == '6': angles["RShoulderRoll"] += move_step; motion.post.setAngles("RShoulderRoll", angles["RShoulderRoll"], 0.1)
-            elif key == '7': angles["RElbowRoll"] += move_step; motion.post.setAngles("RElbowRoll", angles["RElbowRoll"], 0.1)
-            elif key == '9': angles["RElbowRoll"] -= move_step; motion.post.setAngles("RElbowRoll", angles["RElbowRoll"], 0.1)
-            elif key == '1': angles["RElbowYaw"] -= move_step; motion.post.setAngles("RElbowYaw", angles["RElbowYaw"], 0.1)
-            elif key == '3': angles["RElbowYaw"] += move_step; motion.post.setAngles("RElbowYaw", angles["RElbowYaw"], 0.1)
-            elif key == '5': motion.post.setAngles("RHand", 1.0, 0.2)
-            elif key == '0': motion.post.setAngles("RHand", 0.0, 0.2)
+            # --- AJUSTEMENT DYNAMIQUE (BRAS ET POIGNET) ---
+            # Ajout de '+' et '-' dans la liste des touches acceptées
+            elif key in ['8', '2', '4', '6', '7', '9', '1', '3', '5', '0', '+', '-']:
+                cur_arm = motion.getAngles("RArm", True)
+                arm_dict = dict(zip(arm_names, cur_arm))
+                
+                if key == '8': arm_dict["RShoulderPitch"] -= move_step
+                elif key == '2': arm_dict["RShoulderPitch"] += move_step
+                elif key == '6': arm_dict["RShoulderRoll"] -= move_step
+                elif key == '4': arm_dict["RShoulderRoll"] += move_step
+                elif key == '7': arm_dict["RElbowRoll"] += move_step
+                elif key == '9': arm_dict["RElbowRoll"] -= move_step
+                elif key == '1': arm_dict["RElbowYaw"] -= move_step
+                elif key == '3': arm_dict["RElbowYaw"] += move_step
+                elif key == '5': arm_dict["RHand"] = 1.0
+                elif key == '0': arm_dict["RHand"] = 0.0
+                elif key == '+': arm_dict["RWristYaw"] += move_step  # Rotation du poignet
+                elif key == '-': arm_dict["RWristYaw"] -= move_step  # Rotation du poignet
+                
+                # Application immediate (securite incluse pour RShoulderRoll)
+                arm_dict["RShoulderRoll"] = max(-1.5, min(-0.1, arm_dict["RShoulderRoll"]))
+                motion.post.setAngles(arm_names, [arm_dict[name] for name in arm_names], 0.1)
 
-            # --- MANUEL : TETE (IJKL) ---
-            elif key == 'i': angles["HeadPitch"] -= move_step; motion.post.setAngles("HeadPitch", angles["HeadPitch"], 0.1)
-            elif key == 'k': angles["HeadPitch"] += move_step; motion.post.setAngles("HeadPitch", angles["HeadPitch"], 0.1)
-            elif key == 'j': angles["HeadYaw"] += move_step; motion.post.setAngles("HeadYaw", angles["HeadYaw"], 0.1)
-            elif key == 'l': angles["HeadYaw"] -= move_step; motion.post.setAngles("HeadYaw", angles["HeadYaw"], 0.1)
+            # --- AJUSTEMENT DYNAMIQUE (TETE) ---
+            elif key in ['i', 'k', 'j', 'l']:
+                cur_head = motion.getAngles("Head", True)
+                head_dict = dict(zip(head_names, cur_head))
+
+                if key == 'i': head_dict["HeadPitch"] -= move_step
+                elif key == 'k': head_dict["HeadPitch"] += move_step
+                elif key == 'j': head_dict["HeadYaw"] += move_step
+                elif key == 'l': head_dict["HeadYaw"] -= move_step
+                
+                head_dict["HeadPitch"] = max(-0.6, min(0.6, head_dict["HeadPitch"]))
+                motion.post.setAngles(head_names, [head_dict[name] for name in head_names], 0.1)
 
             # --- ROUES ---
             elif key == 'z': motion.post.moveTo(0.2, 0.0, 0.0)
@@ -112,6 +120,7 @@ def main(robot_ip="127.0.0.1"):
             elif key == 'a': motion.post.moveTo(0.0, 0.0, 0.15) 
             elif key == 'e': motion.post.moveTo(0.0, 0.0, -0.15) 
 
+            # --- EXPORT ---
             elif key == 'y':
                 termios.tcsetattr(fd, termios.TCSADRAIN, original_settings)
                 v_arm = [round(a, 4) for a in motion.getAngles("RArm", True)]
@@ -124,10 +133,6 @@ def main(robot_ip="127.0.0.1"):
                 phrase = raw_input("\nDire : "); tts.post.say(phrase); tty.setraw(fd)
             elif key == ' ': motion.stopMove()
             elif key == '\x03': break
-
-            # Sécurités
-            angles["HeadPitch"] = max(-0.6, min(0.6, angles["HeadPitch"]))
-            angles["RShoulderRoll"] = max(-1.5, min(-0.1, angles["RShoulderRoll"]))
 
     except Exception as e: 
         print "\nErreur :", e

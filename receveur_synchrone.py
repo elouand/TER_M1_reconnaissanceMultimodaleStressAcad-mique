@@ -17,12 +17,14 @@ import matplotlib.pyplot as plt
 from scipy.signal import butter, lfilter, iirnotch
 from scipy.signal import find_peaks
 import noisereduce as nr
+import http.server
+import socketserver
 
 from vidToVAD import get_visual_vad
 from audToVAD import get_acoustic_vad, get_text_vad
 from MultimodalState import MultimodalState 
 
-THRESHOLD_SILENCE =150.0   # Seuil de volume pour détecter la voix
+THRESHOLD_SILENCE =500.0   # Seuil de volume pour détecter la voix
 IPU_CHUNKS_LIMIT = 10       # ~300ms de silence requis pour valider une pause
 MIN_PHRASE_CHUNKS = 10      # ~400ms d'audio minimum requis pour justifier un STT (évite les raclements de gorge)
 MAX_PHRASE_CHUNKS = 150
@@ -81,6 +83,14 @@ noise_profile = None
 # --- VERROUS DE SÉCURITÉ ---
 lock_ton = threading.Lock()
 lock_texte = threading.Lock()
+
+def run_http_server():
+    """ Héberge le dossier local sur le port 8000 pour la tablette de Pepper """
+    socketserver.TCPServer.allow_reuse_address = True
+    Handler = http.server.SimpleHTTPRequestHandler
+    httpd = socketserver.TCPServer(("", 8000), Handler)
+    print("🌐 Serveur Web local démarré sur le port 8000")
+    httpd.serve_forever()
 
 # (Fonctions silence_alsa et py_error_handler inchangées...)
 def py_error_handler(filename, line, function, err, fmt): pass
@@ -317,11 +327,12 @@ def apply_smart_denoise(data_int16):
 def enregistrer_wav_diagnostic(buffer_audio, rate=16000):
     global noise_profile
     try:
-        # Appliquer le High-Pass sur le buffer de bruit AVANT de créer le profil
         buffer_pre_filtered = [apply_high_pass(chunk) for chunk in buffer_audio]
         noise_profile = np.concatenate(buffer_pre_filtered).astype(np.float32) / 32768.0
         
-        print("[INTEL] Empreinte (filtrée HP) capturée. Réduction active !")
+        # --- SAUVEGARDE DU PROFIL ---
+        np.save(NOISE_PROFILE_FILE, noise_profile)
+        print(f"💾 Profil de bruit sauvegardé dans {NOISE_PROFILE_FILE}")
         filename = "bruit_pepper_brut.wav"
         print(f"\n[DIAGNOSTIC] Génération du fichier audio : {filename}...")
         
@@ -338,6 +349,21 @@ def enregistrer_wav_diagnostic(buffer_audio, rate=16000):
     except Exception as e:
         print(f"[ERREUR WAV] {e}")
 
+# Nom du fichier de profil
+NOISE_PROFILE_FILE = "noise_profile.npy"
+
+def charger_profil_bruit():
+    global noise_profile
+    if os.path.exists(NOISE_PROFILE_FILE):
+        try:
+            noise_profile = np.load(NOISE_PROFILE_FILE)
+            print(f"✅ Profil de bruit chargé avec succès depuis {NOISE_PROFILE_FILE}")
+        except Exception as e:
+            print(f"⚠️ Erreur lors du chargement du profil: {e}")
+            noise_profile = None
+    else:
+        print("ℹ️ Aucun profil de bruit trouvé. Calibrage nécessaire.")
+
 def run_audio_listening():
     pa = pyaudio.PyAudio()
     # Mise à jour du flux de sortie audio pour écouter en 16kHz
@@ -351,58 +377,76 @@ def run_audio_listening():
     start_phrase_time = 0
 
     print(f"\n--- ÉCOUTE AUDIO ACTIVÉE ({int(SAMPLE_RATE)}Hz) ---")
-    print("🛑 ATTENTION : RESTEZ TOTALEMENT SILENCIEUX (environ 6 secondes).")
-    print("Le système capture le bruit des ventilateurs de Pepper...")
+    
+    # --- MODIFICATION 1 : Message d'attente uniquement si nécessaire ---
+    if noise_profile is None:
+        print("🛑 ATTENTION : RESTEZ TOTALEMENT SILENCIEUX (environ 6 secondes).")
+        print("Le système capture le bruit des ventilateurs de Pepper...")
+    else:
+        print("✅ Profil de bruit détecté ! Le système est prêt à écouter immédiatement.")
     
     while True:
         try:
             data, _ = sock_audio.recvfrom(65535)
             raw_audio = np.frombuffer(data, dtype=np.int16)
             
-            # --- BLOC DIAGNOSTIC ---
-            if len(diag_buffer) < 100: 
-                diag_buffer.append(raw_audio)
-                if len(diag_buffer) == 100:
-                    threading.Thread(target=enregistrer_wav_diagnostic, args=(diag_buffer, int(SAMPLE_RATE))).start()
+            # --- MODIFICATION 2 : On ne capture le diagnostic QUE si on n'a pas de profil ---
+            if noise_profile is None:
+                if len(diag_buffer) < 100: 
+                    diag_buffer.append(raw_audio)
+                    if len(diag_buffer) == 100:
+                        threading.Thread(target=enregistrer_wav_diagnostic, args=(diag_buffer, int(SAMPLE_RATE))).start()
+                # On ne traite pas la voix tant que le profil n'est pas fait
+                continue
+            
+            # ==============================================================
+            # TRAITEMENT DE LA VOIX (Exécuté instantanément si le profil existe)
+            # ==============================================================
             
             # Application du filtre (le filtre est mathématiquement calé sur 16kHz)
-            audio_mono = apply_smart_denoise(raw_audio)
+            audio_mono = apply_high_pass(raw_audio)
             
-            # Retour Audio (Tu entends le son filtré en 16k)
-            audio_stream.write(audio_mono.tobytes())
+            # Retour Audio (Tu entends le son filtré en 16k - à commenter si écho)
+            #audio_stream.write(audio_mono.tobytes())
             
             energy = np.abs(audio_mono).mean()
             
-            # On n'écoute la voix QUE si le profil de bruit a été créé
-            if noise_profile is not None:
-                if energy > THRESHOLD_SILENCE:
-                    if len(current_phrase_buffer) == 0:
-                        start_phrase_time = time.time()
-                        print("\n[ÉCOUTE] ", end="", flush=True)
-                    
-                    current_phrase_buffer.append(audio_mono)
-                    silence_counter = 0
-                    print(".", end="", flush=True)
+            # On écoute la voix
+            if energy > THRESHOLD_SILENCE:
+                if len(current_phrase_buffer) == 0:
+                    start_phrase_time = time.time()
+                    print("\n[ÉCOUTE] ", end="", flush=True)
+                
+                current_phrase_buffer.append(audio_mono)
+                silence_counter = 0
+                print(".", end="", flush=True)
 
-                    if len(current_phrase_buffer) % 15 == 0:
-                        segment_ton = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
-                        threading.Thread(target=audio_analysis_ton_task, args=(segment_ton,), daemon=True).start()
-                else:
-                    if len(current_phrase_buffer) > 0:
-                        if silence_counter == 0:
-                            print(" [PAUSE] ", end="", flush=True)
-                        
-                        silence_counter += 1
-                        print("-", end="", flush=True)
-                        
-                        if silence_counter >= IPU_CHUNKS_LIMIT:
+                if len(current_phrase_buffer) % 15 == 0:
+                    segment_ton = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
+                    threading.Thread(target=audio_analysis_ton_task, args=(segment_ton,), daemon=True).start()
+            else:
+                if len(current_phrase_buffer) > 0:
+                    if silence_counter == 0:
+                        print(" [PAUSE] ", end="", flush=True)
+                    
+                    silence_counter += 1
+                    print("-", end="", flush=True)
+                    
+                    if silence_counter >= IPU_CHUNKS_LIMIT:
                             if len(current_phrase_buffer) >= MIN_PHRASE_CHUNKS:
                                 print(f"\n[IPU] Phrase validée ({len(current_phrase_buffer)} chunks). Envoi STT...")
-                                segment = np.concatenate(current_phrase_buffer).astype(np.float32) / 32768.0
                                 
-                                # --- NOUVEAU : On capture la fin de la phrase ---
+                                # 1. On regroupe la phrase captée (qui a juste le filtre léger)
+                                segment_brut = np.concatenate(current_phrase_buffer)
+                                
+                                # 2. On applique la vraie suppression de bruit complète (profil .npy)
+                                segment_propre_int16 = apply_smart_denoise(segment_brut)
+                                
+                                # 3. Conversion en float pour Whisper
+                                segment_propre = segment_propre_int16.astype(np.float32) / 32768.0
+                                
                                 end_phrase_time = time.time()
-                                threading.Thread(target=audio_analysis_texte_task, args=(segment, start_phrase_time, end_phrase_time), daemon=True).start()
+                                threading.Thread(target=audio_analysis_texte_task, args=(segment_propre, start_phrase_time, end_phrase_time), daemon=True).start()
                             else:
                                 print(f"\n[IPU] Ignoré (Bruit trop court).")
                             
@@ -453,24 +497,23 @@ def audio_analysis_texte_task(segment, start_time, end_time):
     except Exception as e:
         print("\nErreur STT Task:", e)
 
-def envoyer_debug_robot(face_found, mouvement=False):
-    """ Envoie TOUTES les modalités VA au robot Pepper """
+def envoyer_debug_robot(visage_detecte, mouvement=False):
+    """ Envoie les données au robot Pepper """
     try:
-        # On récupère les états actuels dans le state_manager
-        v_fus, a_fus = state_manager.current_fusion
-        v_vis, a_vis = state_manager.data["vision"]
-        v_aud, a_aud = state_manager.data["audio"]
-        v_txt, a_txt = state_manager.data["texte"]
+        v_now, a_now = state_manager.current_fusion
         
+        # --- NOUVEAU : Récupérer le nom de l'image en cours ---
+        image_actuelle = ""
+        if recording and len(images_list) > 0 and current_image_idx > 0:
+            image_actuelle = images_list[current_image_idx - 1]
+
         data = {
-            "status": "ok" if face_found else "none",
+            "status": "ok" if visage_detecte else "none",
             "move": mouvement,
-            "fus": [round(float(v_fus), 2), round(float(a_fus), 2)],
-            "vis": [round(float(v_vis), 2), round(float(a_vis), 2)],
-            "aud": [round(float(v_aud), 2), round(float(a_aud), 2)],
-            "txt": [round(float(v_txt), 2), round(float(a_txt), 2)]
+            "v": round(float(v_now), 2),
+            "a": round(float(a_now), 2),
+            "image": image_actuelle # On ajoute l'image au paquet
         }
-        # On utilise l'IP résolue pour éviter les saccades
         sock_retour.sendto(json.dumps(data).encode('utf-8'), (PEPPER_IP_RESOLVED, PORT_RETOUR))
     except Exception as e:
         pass
@@ -479,7 +522,9 @@ def envoyer_debug_robot(face_found, mouvement=False):
 
 # --- BOUCLE PRINCIPALE ---
 def main():
+    charger_profil_bruit()
     threading.Thread(target=run_audio_listening, daemon=True).start()
+    threading.Thread(target=run_http_server, daemon=True).start()
     sock_video = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock_video.bind((UDP_IP, PORT_VIDEO))
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')

@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
 import torch.nn as nn
 import librosa
 import whisper
@@ -10,6 +9,9 @@ from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2Model,
     Wav2Vec2PreTrainedModel,
 )
+
+import torch
+torch.cuda.empty_cache() # Vide les restes de mémoire des anciens crashs
 
 # --- ARCHITECTURE OFFICIELLE AUDEERING ---
 class RegressionHead(nn.Module):
@@ -37,10 +39,8 @@ class EmotionModel(Wav2Vec2PreTrainedModel):
         self.wav2vec2 = Wav2Vec2Model(config)
         self.classifier = RegressionHead(config)
         
-        # FIX COMPATIBILITÉ : On initialise comme un dictionnaire vide 
-        # pour éviter l'erreur AttributeError sur .keys()
+        # FIX COMPATIBILITÉ
         self.all_tied_weights_keys = {} 
-        
         self.init_weights()
 
     def forward(self, input_values):
@@ -50,14 +50,30 @@ class EmotionModel(Wav2Vec2PreTrainedModel):
         logits = self.classifier(hidden_states)
         return hidden_states, logits
 
-# --- CHARGEMENT ---
-PATH_LOCAL = "./modele_ton"
-device = 'cuda'
+# --- INITIALISATION DES APPAREILS ---
+device = "cuda" if torch.cuda.is_available() else "cpu"
+device_cpu = "cpu" # On force le CPU pour les modèles lourds mais non-temps-réel
 
+# 1. Modèle de Ton (Acoustique) -> CUDA (Carte Graphique)
+PATH_LOCAL = "./modele_ton"
 print("Chargement du modèle local audEERING (Wav2Vec2-Large-Robust)...")
 processor = Wav2Vec2Processor.from_pretrained(PATH_LOCAL)
 model = EmotionModel.from_pretrained(PATH_LOCAL).to(device)
 model.eval()
+
+# 2. Modèle STT (Whisper) -> CPU
+print("Chargement du modèle STT (Whisper)...")
+# Ajout de device=device_cpu ici
+stt_model = whisper.load_model("base", device=device_cpu)
+
+# 3. Modèle NLP (DistilBERT) -> CPU
+print("Chargement du modèle NLP (DistilBERT)...")
+PATH_NLP = "./modele_texte"
+nlp_tokenizer = AutoTokenizer.from_pretrained(PATH_NLP)
+# Remplacement de .to(device) par .to(device_cpu) ici
+nlp_model = AutoModelForSequenceClassification.from_pretrained(PATH_NLP).to(device_cpu)
+nlp_model.eval()
+
 
 def get_acoustic_vad(audio_numpy, sampling_rate=16000):
     """
@@ -70,16 +86,15 @@ def get_acoustic_vad(audio_numpy, sampling_rate=16000):
         else:
             audio_float = audio_numpy
 
-        # 2. Resampling PHYSIQUE 48k -> 16k
+        # 2. Resampling PHYSIQUE -> 16k
         audio_16k = librosa.resample(audio_float, orig_sr=sampling_rate, target_sr=16000)
 
-        # 3. Passage au processor en lui disant que c'est du 16000 Hz
-        # C'est ici qu'on corrige l'erreur : on force sampling_rate=16000
+        # 3. Passage au processor
         y = processor(audio_16k, sampling_rate=16000, return_tensors="pt", padding=True)
         y = y['input_values'].to(device)
 
+        # 4. Inférence protégée pour éviter de saturer la RAM de la carte graphique
         with torch.no_grad():
-            # Le modèle attend un raw audio signal en entrée
             _, logits = model(y)
 
         scores = logits.detach().cpu().numpy()[0] 
@@ -93,49 +108,39 @@ def get_acoustic_vad(audio_numpy, sampling_rate=16000):
         print(f"Erreur VAD acoustique : {e}")
         return None
     
-print("Chargement du modèle STT (Whisper)...")
-stt_model = whisper.load_model("base")
-
-print("Chargement du modèle NLP (DistilBERT)...")
-PATH_NLP = "./modele_texte"
-nlp_tokenizer = AutoTokenizer.from_pretrained(PATH_NLP)
-nlp_model = AutoModelForSequenceClassification.from_pretrained(PATH_NLP).to(device)
-nlp_model.eval()
 
 def get_text_vad(audio_segment, orig_sr=16000):
     try:
         # 1. Resampling
         audio_16k = librosa.resample(audio_segment, orig_sr=orig_sr, target_sr=16000)
 
-        # 2. Normalisation stricte pour Whisper (Max absolu à 1.0)
+        # 2. Normalisation stricte pour Whisper
         max_val = np.max(np.abs(audio_16k))
         if max_val > 0:
             audio_16k = audio_16k / max_val
 
-        # 3. Inférence STT (Whisper)
+        # 3. Inférence STT (Whisper) - S'exécute sur le CPU
         result = stt_model.transcribe(
             audio_16k, 
             language="fr", 
-            fp16=False,
+            fp16=False, # fp16 doit être False sur CPU
             initial_prompt="Ceci est une description d'image en français."
         )
         
         texte = result["text"].strip()
         
-        # Si pas de texte ou juste un bruit ignoré
         if not texte:
             return None, [0.0, 0.0, 0.0]
             
         # 4. Inférence NLP (DistilBERT)
-        inputs = nlp_tokenizer(texte, return_tensors="pt", truncation=True, padding=True).to(device)
+        # Remplacement de .to(device) par .to(device_cpu) ici pour que le tenseur aille sur le CPU
+        inputs = nlp_tokenizer(texte, return_tensors="pt", truncation=True, padding=True).to(device_cpu)
+        
         with torch.no_grad():
             outputs = nlp_model(**inputs)
             
-        # Extraction des scores (VAD)
-        # Squeeze enlève la dimension de batch, tolist convertit le tenseur en liste Python
         scores = outputs.logits.squeeze().cpu().tolist()
         
-        # Sécurité si le modèle renvoie un seul score par erreur
         if isinstance(scores, float):
             scores = [scores, 0.0, 0.0]
             

@@ -514,6 +514,9 @@ def envoyer_debug_robot(visage_detecte, mouvement=False):
             "a": round(float(a_now), 2),
             "image": image_actuelle # On ajoute l'image au paquet
         }
+
+        print(f"📡 [RESEAU] Envoi vers Pepper -> Image: '{image_actuelle}' | V: {data['v']} | A: {data['a']}")
+
         sock_retour.sendto(json.dumps(data).encode('utf-8'), (PEPPER_IP_RESOLVED, PORT_RETOUR))
     except Exception as e:
         pass
@@ -576,10 +579,11 @@ def main():
                 break
             elif key == ord('r'):
                 toggle_image_session()
+                envoyer_debug_robot(True, mouvement=False)
             elif key == ord('m'): # Pour ton bouton mouvement/mark
                 print("M APPUYE")
                 log_to_csv(mark_value=1)
-                envoyer_debug_robot(visage_detecte, mouvement=True)
+                envoyer_debug_robot(True, mouvement=True)
     finally:
         cv2.destroyAllWindows()
 

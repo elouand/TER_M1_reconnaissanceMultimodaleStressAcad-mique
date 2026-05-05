@@ -407,7 +407,7 @@ def run_audio_listening():
             audio_mono = apply_high_pass(raw_audio)
             
             # Retour Audio (Tu entends le son filtré en 16k - à commenter si écho)
-            #audio_stream.write(audio_mono.tobytes())
+            audio_stream.write(audio_mono.tobytes())
             
             energy = np.abs(audio_mono).mean()
             
@@ -436,7 +436,7 @@ def run_audio_listening():
                             if len(current_phrase_buffer) >= MIN_PHRASE_CHUNKS:
                                 print(f"\n[IPU] Phrase validée ({len(current_phrase_buffer)} chunks). Envoi STT...")
                                 
-                                # 1. On regroupe la phrase captée (qui a juste le filtre léger)
+                                                            # 1. On regroupe la phrase captée (qui a juste le filtre léger)
                                 segment_brut = np.concatenate(current_phrase_buffer)
                                 
                                 # 2. On applique la vraie suppression de bruit complète (profil .npy)
@@ -472,7 +472,8 @@ def audio_analysis_texte_task(segment, start_time, end_time):
         texte, va_scores = get_text_vad(segment) 
         
         if texte and va_scores:
-            # 1. Mise à jour de la modalité texte (VA uniquement)
+            # 1. Mise à jour de la modalité texte (VA et texte)
+            print(f"\n[STT] Texte reconnu : {texte}")
             print(f"\n on envoie à state_manager text : {va_scores[:2]}")
             state_manager.update("texte", va_scores[:2])
 

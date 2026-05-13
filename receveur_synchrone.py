@@ -11,6 +11,7 @@ from datetime import datetime
 from ctypes import *
 import json
 import matplotlib
+import re
 import random
 matplotlib.use('Agg') # Force Matplotlib à ne pas ouvrir de fenêtre
 import matplotlib.pyplot as plt
@@ -84,6 +85,10 @@ noise_profile = None
 lock_ton = threading.Lock()
 lock_texte = threading.Lock()
 
+# --- VARIABLES PARTICIPANT ---
+participant_id = ""
+participant_dir = ""
+
 def run_http_server():
     """ Héberge le dossier local sur le port 8000 pour la tablette de Pepper """
     socketserver.TCPServer.allow_reuse_address = True
@@ -106,7 +111,7 @@ silence_alsa()
 
 # --- INITIALISATION ---
 UDP_IP = "0.0.0.0"
-PORT_VIDEO, PORT_AUDIO = 5005, 5006
+PORT_VIDEO, PORT_AUDIO, PORT_MOTION = 5005, 5006, 5009
 state_manager = MultimodalState()
 
 PEPPER_NAME = "Pepper.local" # Ou l'IP directe (ex: "192.168.1.50")
@@ -121,6 +126,83 @@ except Exception as e:
 
 PORT_RETOUR = 5007
 sock_retour = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+def envoyer_commande_bras(commande):
+    """ Envoie l'ordre 7 ou 8 à Pepper """
+    try:
+        sock_retour.sendto(commande.encode('utf-8'), (PEPPER_IP_RESOLVED, PORT_MOTION))
+    except Exception as e:
+        print(f"Erreur envoi bras : {e}")
+
+def get_next_participant_number():
+    """ Scanne le dossier CSV_DIR pour trouver le prochain numéro disponible """
+    if not os.path.exists(CSV_DIR):
+        os.makedirs(CSV_DIR)
+        return 1
+    
+    # On cherche les dossiers de type 'Participant_XXX_...'
+    folders = [f for f in os.listdir(CSV_DIR) if os.path.isdir(os.path.join(CSV_DIR, f))]
+    
+    existing_ids = []
+    for f in folders:
+        # Regex pour extraire le nombre juste après 'Participant_'
+        match = re.match(r"Participant_(\d+)", f)
+        if match:
+            existing_ids.append(int(match.group(1)))
+    
+    if not existing_ids:
+        return 1
+    
+    return max(existing_ids) + 1
+
+def init_participant_session():
+    global participant_id, participant_dir, images_list, current_image_idx
+    
+    # 1. Génération automatique de l'ID
+    next_num = get_next_participant_number()
+    p_id_str = f"{next_num:03d}" # Formate en 001, 002, etc.
+
+    print("\n" + "="*50)
+    print(f"🎓 SESSION PARTICIPANT n°{p_id_str}")
+    print("="*50)
+    
+    # 2. On ne demande plus que le nécessaire pour les stats
+    sexe = input("Sexe (M/F/Autre) : ").upper()
+    age = input("Age : ")
+    
+    participant_id = f"Participant_{p_id_str}_{sexe}_{age}"
+    participant_dir = os.path.join(CSV_DIR, participant_id)
+    
+    if not os.path.exists(participant_dir):
+        os.makedirs(participant_dir)
+        
+    # Sauvegarde des métadonnées pour faciliter vos moyennes plus tard
+    meta_path = os.path.join(participant_dir, "metadata.json")
+    with open(meta_path, 'w') as f:
+        json.dump({
+            "id_numerique": next_num,
+            "sexe": sexe, 
+            "age": age, 
+            "date": datetime.now().isoformat()
+        }, f, indent=4)
+
+    # Réinitialisation de la liste d'images pour ce participant
+    images_list = [f for f in os.listdir("images") if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    random.shuffle(images_list)
+    current_image_idx = 0
+    
+    # NOUVEAU : Sélection d'une image aléatoire pour le toucher
+    if len(images_list) > 0:
+        index_toucher = random.randint(1, len(images_list))
+        print(f"\n✅ Dossier créé : {participant_dir}")
+        print(f"🔀 Liste de {len(images_list)} images préparée et mélangée.")
+        # Ajout visuel fort
+        print("\n" + "!"*50)
+        print(f"⚠️ INSTRUCTION : Le robot devra toucher le participant sur l'image n° {index_toucher} ! ⚠️")
+        print("!"*50 + "\n")
+    
+    print("Appuyez sur 'r' dans la fenêtre vidéo pour lancer la première image.")
+
 # --- LOGIQUE D'ENREGISTREMENT ---
 def toggle_image_session():
     """ 
@@ -148,38 +230,29 @@ def toggle_image_session():
     
     # 1. Charger la liste des images si c'est le tout début
     if not images_list:
-        images_list = [f for f in os.listdir("images") if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        if not images_list:
-            print("\n⚠️ ERREUR : Aucune image trouvée dans le dossier 'images/'.")
-            return
-        
-        random.shuffle(images_list)
-        print(f"\n🔀 Liste des {len(images_list)} images mélangée aléatoirement pour ce sujet !")
-        print(f"Vous toucherez sur l'image numero : {random.randint(1,6)} !!!")
+        print("\n⚠️ ERREUR : La liste d'images est vide. Avez-vous initialisé le participant ?")
+        return
 
-    # 2. Vérifier si on a fait toutes les images
+    # Vérifier si on a fait toutes les images
     if current_image_idx >= len(images_list):
         print("\n" + "="*50)
-        print("🎉 TOUTES LES IMAGES ONT ÉTÉ DÉCRITES !")
+        print("🎉 TOUTES LES IMAGES ONT ÉTÉ DÉCRITES POUR CE PARTICIPANT !")
+        print("Fermeture automatique du script.") # Petit changement de texte
         print("="*50 + "\n")
-        return
+        return "QUITTER"
         
-    # 3. Récupérer l'image suivante
+    # Récupérer l'image suivante
     image_name = images_list[current_image_idx]
     current_image_idx += 1
     
     print("\n" + "*"*50)
-    print(f"👉 NOUVELLE IMAGE AFFICHÉE : {image_name}")
+    print(f"👉 NOUVELLE IMAGE AFFICHÉE : {image_name} ({current_image_idx}/{len(images_list)})")
     print("*"*50)
     
-    # 4. Créer l'arborescence (csv/nom_de_l_image/)
-    image_csv_dir = os.path.join(CSV_DIR, image_name)
-    if not os.path.exists(image_csv_dir):
-        os.makedirs(image_csv_dir)
-        
-    # 5. Préparer le fichier
+    # --- MODIFICATION ICI : On sauvegarde directement dans le dossier du participant ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = os.path.join(image_csv_dir, f"{timestamp}.csv")
+    # On inclut le nom de l'image dans le nom du fichier CSV
+    filename = os.path.join(participant_dir, f"{image_name}_{timestamp}.csv")
     
     try:
         csv_file = open(filename, mode='w', newline='')
@@ -188,8 +261,7 @@ def toggle_image_session():
         csv_writer.writerow(header)
         recording = True
         
-        # 6. On logue la première ligne (top départ officiel) avec mark=1
-        log_to_csv(mark_value=1)
+        log_to_csv(mark_value=0)
         
         print(f"--- ⏺ ENREGISTREMENT DÉMARRÉ : {filename} ---")
         print("🎙️ Le système enregistre maintenant les réactions !")
@@ -212,6 +284,33 @@ def log_to_csv(mark_value=0):
             csv_writer.writerow(row)
         except Exception as e:
             print(f"Erreur d'écriture CSV: {e}")
+            
+def log_stt_text(texte, valence, arousal):
+    """ Sauvegarde le texte reconnu et ses scores dans le dossier du participant """
+    global participant_dir
+    
+    # Sécurité : on s'assure que le dossier participant est bien créé
+    if not participant_dir or not os.path.exists(participant_dir):
+        return 
+
+    stt_file_path = os.path.join(participant_dir, "stt_transcriptions.csv")
+    file_exists = os.path.exists(stt_file_path)
+
+    try:
+        # On utilise encoding='utf-8' impérativement pour les accents français (é, à, ç)
+        with open(stt_file_path, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            
+            # Si c'est la première phrase du participant, on écrit l'en-tête
+            if not file_exists:
+                writer.writerow(["Timestamp", "Texte", "Valence", "Arousal"])
+            
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # On écrit la ligne
+            writer.writerow([now, texte, round(valence, 3), round(arousal, 3)])
+            
+    except Exception as e:
+        print(f"Erreur lors de la sauvegarde du texte STT: {e}")
 
 def log_historical_to_csv(t_timestamp, fusion, vision, audio, texte, mark_value=0):
     """ Écrit une ligne CSV pour le découpage rétroactif """
@@ -409,6 +508,14 @@ def run_audio_listening():
             # Retour Audio (Tu entends le son filtré en 16k - à commenter si écho)
             audio_stream.write(audio_mono.tobytes())
             
+            # --- AJOUT ICI : ON COUPE L'ÉCOUTE SI ON EST EN PAUSE ---
+            if not recording:
+                # On vide le buffer pour éviter de garder un bout de mot prononcé juste avant la pause
+                current_phrase_buffer = [] 
+                silence_counter = 0
+                continue # On passe direct au paquet suivant sans analyser l'énergie
+            # --------------------------------------------------------
+            
             energy = np.abs(audio_mono).mean()
             
             # On écoute la voix
@@ -475,6 +582,11 @@ def audio_analysis_texte_task(segment, start_time, end_time):
             # 1. Mise à jour de la modalité texte (VA et texte)
             print(f"\n[STT] Texte reconnu : {texte}")
             print(f"\n on envoie à state_manager text : {va_scores[:2]}")
+            
+            # --- AJOUT ICI : Sauvegarde dans le fichier du participant ---
+            log_stt_text(texte, va_scores[0], va_scores[1])
+            # -----------------------------------------------------------
+            
             state_manager.update("texte", va_scores[:2])
 
             print(f"\n--- DÉCOUPAGE RÉTROACTIF (Tranches de 2s) ---")
@@ -526,17 +638,24 @@ def envoyer_debug_robot(visage_detecte, mouvement=False):
 
 # --- BOUCLE PRINCIPALE ---
 def main():
+    print("--- SYSTEME MULTIMODAL VA PRÊT (AVEC LOGS) ---")
+    
+    # 1. On règle l'administratif d'abord (le code attend tes inputs ici)
+    init_participant_session()
+
+    # 2. ENSUITE on lance les processus en arrière-plan
     charger_profil_bruit()
     threading.Thread(target=run_audio_listening, daemon=True).start()
     threading.Thread(target=run_http_server, daemon=True).start()
+    
+    # 3. Initialisation de la vidéo
     sock_video = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock_video.bind((UDP_IP, PORT_VIDEO))
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     last_robot_update = 0
     last_face_log = 0
     nb_frame_logs = 0
-
-    print("--- SYSTEME MULTIMODAL VA PRÊT (AVEC LOGS) ---")
+    bras_en_flexion = False
 
     try:
         while True:
@@ -579,12 +698,32 @@ def main():
             if key == ord('q'): 
                 break
             elif key == ord('r'):
-                toggle_image_session()
+                signal = toggle_image_session() # <--- MODIFICATION ICI
+                if signal == "QUITTER":         # <--- AJOUT
+                    break                       # <--- AJOUT : On casse la boucle infinie
                 envoyer_debug_robot(True, mouvement=False)
             elif key == ord('m'): # Pour ton bouton mouvement/mark
                 print("M APPUYE")
                 log_to_csv(mark_value=1)
                 envoyer_debug_robot(True, mouvement=True)
+            elif key == ord('7'):
+                print("💪 Commande : Flexion du coude")
+                envoyer_commande_bras("7")
+                bras_en_flexion = True # On mémorise qu'on s'est préparé à toucher
+                
+            elif key == ord('8'):
+                print("🦾 Commande : Extension du coude")
+                envoyer_commande_bras("8")
+                
+                # Si on fait une extension ALORS qu'on était en flexion -> TOUCHER !
+                if bras_en_flexion:
+                    print("\n" + "🎯"*10)
+                    print("🎯 TOUCHER DÉTECTÉ ET ENREGISTRÉ (MARK = 1) !")
+                    print("🎯"*10 + "\n")
+                    
+                    log_to_csv(mark_value=1) # On marque le CSV automatiquement
+                    envoyer_debug_robot(visage_detecte, mouvement=True)
+                    bras_en_flexion = False # On réinitialise pour le prochain
     finally:
         cv2.destroyAllWindows()
 

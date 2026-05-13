@@ -127,13 +127,14 @@ def get_text_vad(audio_segment, orig_sr=16000):
             initial_prompt="Ceci est une description d'image en français."
         )
         
-        texte = result["text"].strip()
+        # ---> C'est ici que "texte" est défini <---
+        texte = result["text"].strip() 
         
         if not texte:
             return None, [0.0, 0.0, 0.0]
             
         # 4. Inférence NLP (DistilBERT)
-        # Remplacement de .to(device) par .to(device_cpu) ici pour que le tenseur aille sur le CPU
+        # ---> C'est ici que "inputs" est défini <---
         inputs = nlp_tokenizer(texte, return_tensors="pt", truncation=True, padding=True).to(device_cpu)
         
         with torch.no_grad():
@@ -144,7 +145,22 @@ def get_text_vad(audio_segment, orig_sr=16000):
         if isinstance(scores, float):
             scores = [scores, 0.0, 0.0]
             
-        return texte, scores
+        # =========================================================
+        # EXACERBATION (SCALING) DES SCORES NLP
+        # =========================================================
+        FACTEUR = 2.5
+        
+        scores_etires = []
+        for s in scores:
+            scores_etires.append(max(-1.0, min(1.0, s * FACTEUR)))
+            
+        # Sécurité : Si le modèle ne renvoie que 2 scores (V, A), 
+        # on ajoute un 0.0 pour la dominance afin de respecter le format attendu.
+        while len(scores_etires) < 3:
+            scores_etires.append(0.0)
+        
+        return texte, scores_etires
+        # =========================================================
         
     except Exception as e:
         print(f"Erreur STT/NLP détaillée : {e}")

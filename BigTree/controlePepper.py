@@ -32,6 +32,7 @@ def main(robot_ip="127.0.0.1"):
             print("[!] Note: Erreur init :", e)
 
         motion.wakeUp()
+        motion.setCollisionProtectionEnabled("RArm", False)
         motion.setStiffnesses(["RArm", "Head", "Move"], 1.0)
         
         arm_names = ["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll", "RWristYaw", "RHand"]
@@ -92,8 +93,8 @@ def main(robot_ip="127.0.0.1"):
                 elif key == '3': arm_dict["RElbowYaw"] += move_step
                 elif key == '5': arm_dict["RHand"] = 1.0
                 elif key == '0': arm_dict["RHand"] = 0.0
-                elif key == '+': arm_dict["RWristYaw"] += move_step  # Rotation du poignet
-                elif key == '-': arm_dict["RWristYaw"] -= move_step  # Rotation du poignet
+                elif key == '+': arm_dict["RWristYaw"] += 0.3  # Rotation du poignet
+                elif key == '-': arm_dict["RWristYaw"] -= 0.3  # Rotation du poignet
                 
                 # Application immediate (securite incluse pour RShoulderRoll)
                 arm_dict["RShoulderRoll"] = max(-1.5, min(-0.1, arm_dict["RShoulderRoll"]))
@@ -142,6 +143,7 @@ def main(robot_ip="127.0.0.1"):
         try:
             life.setAutonomousAbilityEnabled("BasicAwareness", True)
             life.setAutonomousAbilityEnabled("BackgroundMovement", True)
+            motion.setCollisionProtectionEnabled("All", True)
             motion.setBreathEnabled("All", True)
         except: pass
         print("\nFermeture.")

@@ -20,7 +20,6 @@ def tracer_graphiques(chemin_csv):
 
     # Paramétrage de la figure (2 graphiques l'un au-dessus de l'autre)
     fig, (ax_valence, ax_arousal) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
-    fig.suptitle(f"Analyse Émotionnelle Multimodale\nFichier: {os.path.basename(chemin_csv)}", fontsize=16, fontweight='bold')
 
     # ==========================================
     # GRAPHIQUE 1 : VALENCE (Positif / Négatif)
@@ -28,9 +27,9 @@ def tracer_graphiques(chemin_csv):
     ax_valence.set_title("VALENCE ( -1 = Négatif | +1 = Positif )", fontsize=14)
     
     # Lignes des modalités (en pointillés et plus fines)
-    ax_valence.plot(df['temps_relatif'], df['vv'], label='Vision (Sourire/Tristesse)', color='green', linestyle='--', alpha=0.7)
-    ax_valence.plot(df['temps_relatif'], df['va'], label='Audio (Ton de la voix)', color='blue', linestyle='--', alpha=0.7)
-    ax_valence.plot(df['temps_relatif'], df['vt'], label='Texte (Sens des mots)', color='orange', linestyle='--', alpha=0.7)
+    ax_valence.plot(df['temps_relatif'], df['vv'], label='Vision', color='green', linestyle='--', alpha=0.7)
+    ax_valence.plot(df['temps_relatif'], df['va'], label='Audio', color='blue', linestyle='--', alpha=0.7)
+    ax_valence.plot(df['temps_relatif'], df['vt'], label='Texte', color='orange', linestyle='--', alpha=0.7)
     
     # Ligne de FUSION (en gras)
     ax_valence.plot(df['temps_relatif'], df['v'], label='FUSION GLOBALE', color='black', linewidth=3)
@@ -47,9 +46,9 @@ def tracer_graphiques(chemin_csv):
     ax_arousal.set_title("AROUSAL ( -1 = Calme/Fatigué | +1 = Actif/Stressé )", fontsize=14)
     
     # Lignes des modalités
-    ax_arousal.plot(df['temps_relatif'], df['av'], label='Vision (Intensité du visage)', color='green', linestyle='--', alpha=0.7)
-    ax_arousal.plot(df['temps_relatif'], df['aa'], label='Audio (Volume/Énergie)', color='blue', linestyle='--', alpha=0.7)
-    ax_arousal.plot(df['temps_relatif'], df['at'], label='Texte (Mots forts)', color='orange', linestyle='--', alpha=0.7)
+    ax_arousal.plot(df['temps_relatif'], df['av'], label='Vision', color='green', linestyle='--', alpha=0.7)
+    ax_arousal.plot(df['temps_relatif'], df['aa'], label='Audio', color='blue', linestyle='--', alpha=0.7)
+    ax_arousal.plot(df['temps_relatif'], df['at'], label='Texte', color='orange', linestyle='--', alpha=0.7)
     
     # Ligne de FUSION
     ax_arousal.plot(df['temps_relatif'], df['a'], label='FUSION GLOBALE', color='black', linewidth=3)

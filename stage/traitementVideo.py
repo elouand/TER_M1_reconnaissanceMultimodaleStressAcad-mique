@@ -60,7 +60,9 @@ class EmotionRegressor:
         task_path = os.path.join(dir_path, 'face_landmarker.task')
         self.aligner = FaceAligner(model_path=task_path)
         
-        self.model_name = 'enet_b0_8_va_mtl' 
+        # --- RETOUR AU MODÈLE SÉCURISÉ ---
+        # On utilise la version B0 qui est déjà téléchargée et en cache sur ton PC !
+        self.model_name = 'enet_b0_8_va_mtl'
         print(f"Chargement de {self.model_name}...")
         
         self.model = HSEmotionRecognizer(model_name=self.model_name, device=device)

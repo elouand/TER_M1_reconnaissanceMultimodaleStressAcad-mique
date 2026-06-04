@@ -7,7 +7,7 @@ import glob
 # ==========================================
 # CONFIGURATION
 # ==========================================
-VERSION = "v1.0"
+VERSION = "v1.1"
 CSV_DIR = os.path.join("adj_csv", VERSION)
 
 def calculer_ccc(y_true, y_pred):

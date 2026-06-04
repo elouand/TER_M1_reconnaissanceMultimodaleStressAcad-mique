@@ -6,6 +6,7 @@ import numpy as np
 import librosa
 import math
 import torch
+import torch.nn.functional as F  # <--- AJOUT INDISPENSABLE
 import subprocess
 import glob
 from tqdm import tqdm
@@ -16,7 +17,7 @@ from traitementVideo import EmotionRegressor
 # ==========================================
 # CONFIGURATION
 # ==========================================
-VERSION = "v1.0"
+VERSION = "v1.1" 
 WINDOW_SIZE = 2.0
 VIDEO_DIR = "videos_test"
 CSV_DIR = os.path.join("adj_csv", VERSION)
@@ -40,15 +41,25 @@ def analyser_texte_global(video_path):
         texte = seg["text"].strip()
         if not texte: continue
             
-        inputs = nlp_tokenizer(texte, return_tensors="pt", truncation=True, padding=True).to(device_cpu)
+        inputs = nlp_tokenizer(texte, return_tensors="pt", truncation=True, max_length=512).to(device_cpu)
         with torch.no_grad():
             outputs = nlp_model(**inputs)
             
-        scores = outputs.logits.squeeze().cpu().tolist()
-        if isinstance(scores, float): scores = [scores, 0.0, 0.0]
+        # ========================================================
+        # NOUVELLE LOGIQUE MATHÉMATIQUE (Softmax + Espérance)
+        # ========================================================
+        probs = F.softmax(outputs.logits, dim=-1).squeeze().cpu().tolist()
+        if isinstance(probs, float): probs = [probs]
+
+        # Mapping : 1 étoile (-1.0), 2 étoiles (-0.5), ..., 5 étoiles (1.0)
+        poids_valence = [-1.0, -0.5, 0.0, 0.5, 1.0]
+        if len(probs) == 5:
+            v_texte = sum(p * w for p, w in zip(probs, poids_valence))
+        else:
+            v_texte = 0.0
             
-        v_texte = max(-1.0, min(1.0, scores[0] * 2.5))
-        a_texte = max(-1.0, min(1.0, scores[1] * 2.5))
+        a_texte = abs(v_texte) * 0.8
+        # ========================================================
         
         segments_annotes.append({"start": seg["start"], "end": seg["end"], "texte": texte, "v": v_texte, "a": a_texte})
         
@@ -69,7 +80,7 @@ def run_inference_batch():
         csv_out = os.path.join(CSV_DIR, f"{nom_video}_inferred.csv")
 
         if not os.path.exists(data_dir):
-            print(f"⚠️ Données brutes manquantes pour {nom_video}, on ignore.")
+            print(f"⚠️ Données brutes manquantes pour {nom_video}. Avez-vous bien lancé 1b_ingestion en v1.1 ?")
             continue
 
         print(f"\n📝 [{nom_video}] STT & NLP Global...")

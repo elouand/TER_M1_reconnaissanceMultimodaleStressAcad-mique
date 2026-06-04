@@ -11,7 +11,7 @@ import glob
 # ==========================================
 # CONFIGURATION
 # ==========================================
-VERSION = "v1.0"
+VERSION = "v1.1"
 WINDOW_SIZE = 2.0
 VIDEO_DIR = "videos_test"
 TEMP_WAV = "audio_temp_extraction.wav"

@@ -2,6 +2,7 @@
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch.nn as nn
+import torch.nn.functional as F  # <--- AJOUT POUR LE SOFTMAX
 import librosa
 import whisper
 from transformers import Wav2Vec2Processor
@@ -63,15 +64,13 @@ model.eval()
 
 # 2. Modèle STT (Whisper) -> CPU
 print("Chargement du modèle STT (Whisper)...")
-# Ajout de device=device_cpu ici
 stt_model = whisper.load_model("base", device=device_cpu)
 
-# 3. Modèle NLP (DistilBERT) -> CPU
-print("Chargement du modèle NLP (DistilBERT)...")
-PATH_NLP = "./modele_texte"
-nlp_tokenizer = AutoTokenizer.from_pretrained(PATH_NLP)
-# Remplacement de .to(device) par .to(device_cpu) ici
-nlp_model = AutoModelForSequenceClassification.from_pretrained(PATH_NLP).to(device_cpu)
+# 3. Modèle NLP Francophone (DistilCamemBERT) -> CPU
+print("Chargement du modèle NLP Francophone (DistilCamemBERT)...")
+nlp_model_name = "cmarkea/distilcamembert-base-sentiment"
+nlp_tokenizer = AutoTokenizer.from_pretrained(nlp_model_name)
+nlp_model = AutoModelForSequenceClassification.from_pretrained(nlp_model_name).to(device_cpu)
 nlp_model.eval()
 
 
@@ -127,40 +126,42 @@ def get_text_vad(audio_segment, orig_sr=16000):
             initial_prompt="Ceci est une description d'image en français."
         )
         
-        # ---> C'est ici que "texte" est défini <---
         texte = result["text"].strip() 
         
         if not texte:
             return None, [0.0, 0.0, 0.0]
             
-        # 4. Inférence NLP (DistilBERT)
-        # ---> C'est ici que "inputs" est défini <---
-        inputs = nlp_tokenizer(texte, return_tensors="pt", truncation=True, padding=True).to(device_cpu)
+        # 4. Inférence NLP (DistilCamemBERT)
+        inputs = nlp_tokenizer(texte, return_tensors="pt", truncation=True, max_length=512).to(device_cpu)
         
         with torch.no_grad():
             outputs = nlp_model(**inputs)
             
-        scores = outputs.logits.squeeze().cpu().tolist()
+        # 5. Conversion en Probabilités (Softmax)
+        # Le modèle renvoie 5 classes : 1 étoile, 2 étoiles, 3 étoiles, 4 étoiles, 5 étoiles
+        probs = F.softmax(outputs.logits, dim=-1).squeeze().cpu().tolist()
         
-        if isinstance(scores, float):
-            scores = [scores, 0.0, 0.0]
+        # Sécurité pour éviter un crash si une seule classe est détectée
+        if isinstance(probs, float):
+            probs = [probs]
+
+        # 6. Mapping vers la Valence (Espérance mathématique)
+        # 1 étoile = -1.0 | 2 = -0.5 | 3 = 0.0 | 4 = 0.5 | 5 = 1.0
+        poids_valence = [-1.0, -0.5, 0.0, 0.5, 1.0]
+        
+        if len(probs) == 5:
+            v_texte = sum(p * w for p, w in zip(probs, poids_valence))
+        else:
+            v_texte = 0.0
             
-        # =========================================================
-        # EXACERBATION (SCALING) DES SCORES NLP
-        # =========================================================
-        FACTEUR = 2.5
+        # 7. Mapping vers l'Arousal (Heuristique d'intensité)
+        # Une valence extrême (très joyeux ou très en colère) implique un fort Arousal.
+        # Une valence neutre (0.0) implique un Arousal faible.
+        a_texte = abs(v_texte) * 0.8 # L'Arousal monte jusqu'à 0.8 max par le texte
         
-        scores_etires = []
-        for s in scores:
-            scores_etires.append(max(-1.0, min(1.0, s * FACTEUR)))
-            
-        # Sécurité : Si le modèle ne renvoie que 2 scores (V, A), 
-        # on ajoute un 0.0 pour la dominance afin de respecter le format attendu.
-        while len(scores_etires) < 3:
-            scores_etires.append(0.0)
+        scores_finaux = [round(v_texte, 4), round(a_texte, 4), 0.0]
         
-        return texte, scores_etires
-        # =========================================================
+        return texte, scores_finaux
         
     except Exception as e:
         print(f"Erreur STT/NLP détaillée : {e}")

@@ -17,7 +17,7 @@ from traitementVideo import EmotionRegressor
 # ==========================================
 # CONFIGURATION
 # ==========================================
-VERSION = "v1.1" 
+VERSION = "v1.2" 
 WINDOW_SIZE = 2.0
 VIDEO_DIR = "videos_test"
 CSV_DIR = os.path.join("adj_csv", VERSION)

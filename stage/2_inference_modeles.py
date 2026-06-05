@@ -13,6 +13,8 @@ from tqdm import tqdm
 
 from audToVAD import get_acoustic_vad, stt_model, nlp_model, nlp_tokenizer, device_cpu
 from traitementVideo import EmotionRegressor
+                
+from audToVAD import is_speech_present
 
 # ==========================================
 # CONFIGURATION
@@ -119,12 +121,19 @@ def run_inference_batch():
             # AUDIO
             if os.path.exists(chemin_audio):
                 audio_data, sr = librosa.load(chemin_audio, sr=16000, mono=True)
-                res_aud = get_acoustic_vad(audio_data, sampling_rate=16000)
-                if res_aud:
-                    row["v_audio"] = round(float((res_aud['valence'] * 2) - 1), 4)
-                    row["a_audio"] = round(float((res_aud['arousal'] * 2) - 1), 4)
-                else: row["v_audio"], row["a_audio"] = 0.0, 0.0
-            else: row["v_audio"], row["a_audio"] = 0.0, 0.0
+                if is_speech_present(audio_data, sampling_rate=16000):
+                    # Il y a une voix ! On lance l'analyse d'émotion Wav2Vec2
+                    res_aud = get_acoustic_vad(audio_data, sampling_rate=16000)
+                    if res_aud:
+                        row["v_audio"] = round(float((res_aud['valence'] * 2) - 1), 4)
+                        row["a_audio"] = round(float((res_aud['arousal'] * 2) - 1), 4)
+                    else: 
+                        row["v_audio"], row["a_audio"] = 0.0, 0.0
+                else:
+                    # SILENCE ACOUSTIQUE DÉTECTÉ : On coupe les valeurs parasites !
+                    row["v_audio"], row["a_audio"] = 0.0, 0.0
+            else: 
+                row["v_audio"], row["a_audio"] = 0.0, 0.0
 
             # VISION
             v_list, a_list = [], []

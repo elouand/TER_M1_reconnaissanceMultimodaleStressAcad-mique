@@ -73,6 +73,15 @@ nlp_tokenizer = AutoTokenizer.from_pretrained(nlp_model_name)
 nlp_model = AutoModelForSequenceClassification.from_pretrained(nlp_model_name).to(device_cpu)
 nlp_model.eval()
 
+# 4. Modèle VAD (Silero) -> CPU
+print("Chargement du modèle VAD Acoustique (Silero)...")
+# trust_repo=True est nécessaire pour les versions récentes de pytorch
+vad_model, utils_vad = torch.hub.load(repo_or_dir='snakers4/silero-vad',
+                                      model='silero_vad',
+                                      force_reload=False,
+                                      trust_repo=True)
+get_speech_timestamps = utils_vad[0] # Fonction utilitaire de Silero
+
 
 def get_acoustic_vad(audio_numpy, sampling_rate=16000):
     """
@@ -166,6 +175,33 @@ def get_text_vad(audio_segment, orig_sr=16000):
     except Exception as e:
         print(f"Erreur STT/NLP détaillée : {e}")
         return None, None
+    
+def is_speech_present(audio_numpy, sampling_rate=16000):
+    """
+    Retourne True si une voix humaine est détectée dans l'audio, False sinon (bruit blanc, silence).
+    """
+    try:
+        # Conversion en float32 normalisé
+        if audio_numpy.dtype == np.int16:
+            audio_float = audio_numpy.astype(np.float32) / 32768.0
+        else:
+            audio_float = audio_numpy
+
+        audio_16k = librosa.resample(audio_float, orig_sr=sampling_rate, target_sr=16000)
+        
+        # Silero VAD a besoin d'un tenseur PyTorch
+        tensor_audio = torch.FloatTensor(audio_16k)
+        
+        # Récupération des timestamps de parole
+        speech_timestamps = get_speech_timestamps(tensor_audio, vad_model, sampling_rate=16000)
+        
+        # Si la liste est vide, il n'y a aucune voix humaine !
+        return len(speech_timestamps) > 0
+        
+    except Exception as e:
+        print(f"Erreur VAD Silero : {e}")
+        # En cas de doute ou d'erreur, on laisse l'audio passer
+        return True
 
 if __name__ == "__main__":
     # Test silence
